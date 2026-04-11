@@ -5,9 +5,10 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { LayoutDashboard, Wallet, TrendingUp, Award, DollarSign, LogIn, LogOut, User as UserIcon, Moon, Sun, LineChart as ChartIcon, ChevronRight, Copy, CheckCircle2, ShieldCheck, Users, ArrowUpRight, ArrowDownRight, Search, Check, X, Trash2, Bell, BellRing, Plus } from 'lucide-react';
-import { auth, db, signInWithGoogle, logout } from './firebase';
+import { auth, db, storage, signInWithGoogle, logout } from './firebase';
 import { onAuthStateChanged, User, sendEmailVerification } from 'firebase/auth';
-import { doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, serverTimestamp, deleteDoc, runTransaction } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
 import emailjs from '@emailjs/browser';
 
@@ -40,8 +41,9 @@ interface FirestoreErrorInfo {
 }
 
 function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errorMessage = error instanceof Error ? error.message : String(error);
   const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
+    error: errorMessage,
     authInfo: {
       userId: auth.currentUser?.uid,
       email: auth.currentUser?.email,
@@ -59,7 +61,9 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
     path
   }
   console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  // if (errorMessage.includes('Missing or insufficient permissions')) {
+  //   throw new Error(JSON.stringify(errInfo));
+  // }
 }
 
 export default function App() {
@@ -73,6 +77,7 @@ export default function App() {
   const [allUsers, setAllUsers] = useState<any[]>([]);
   const [allTransactions, setAllTransactions] = useState<any[]>([]);
   const [allInvestments, setAllInvestments] = useState<any[]>([]);
+  const [logs, setLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [amountInput, setAmountInput] = useState('');
   const [investAmountInput, setInvestAmountInput] = useState('10');
@@ -81,7 +86,7 @@ export default function App() {
   const [editAddress, setEditAddress] = useState('');
   const [editPhotoURL, setEditPhotoURL] = useState('');
   const [editBinanceId, setEditBinanceId] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState<'bank' | 'binance'>('bank');
+  const [paymentMethod, setPaymentMethod] = useState<'bank' | 'binance'>('binance');
   const [binanceId, setBinanceId] = useState('');
   const [status, setStatus] = useState<{ type: 'success' | 'error', message: string } | null>(null);
   const [transactionFilter, setTransactionFilter] = useState<'all' | 'deposit' | 'withdrawal'>('all');
@@ -97,10 +102,34 @@ export default function App() {
   const [verificationSent, setVerificationSent] = useState(false);
   const [copied, setCopied] = useState(false);
   const [refreshTimer, setRefreshTimer] = useState(0);
+  
+  // KYC State
+  const [kycDocumentType, setKycDocumentType] = useState('national_id');
+  const [kycDocumentNumber, setKycDocumentNumber] = useState('');
+  const [kycFullName, setKycFullName] = useState('');
+  const [kycNationality, setKycNationality] = useState('');
+  const [kycDob, setKycDob] = useState('');
+  const [kycDocumentUrl, setKycDocumentUrl] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [adminView, setAdminView] = useState<'dashboard' | 'logs'>('dashboard');
+
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const saved = localStorage.getItem('theme');
     return saved === 'dark';
   });
+
+  const logEvent = async (userId: string | null, type: string, message: string) => {
+    try {
+      await addDoc(collection(db, 'logs'), {
+        userId,
+        type,
+        message,
+        timestamp: serverTimestamp()
+      });
+    } catch (error) {
+      console.error('Error logging event:', error);
+    }
+  };
 
   // محاكاة بيانات الأداء التاريخية بناءً على الاستثمارات الحالية
   const performanceData = useMemo(() => {
@@ -182,17 +211,33 @@ export default function App() {
         handleFirestoreError(error, OperationType.LIST, 'investments');
       });
 
+      const unsubAllLogs = onSnapshot(collection(db, 'logs'), (snapshot) => {
+        const items: any[] = [];
+        snapshot.forEach((doc) => items.push({ id: doc.id, ...doc.data() }));
+        items.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+        setLogs(items);
+      }, (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'logs');
+      });
+
       return () => {
         unsubAllUsers();
         unsubAllTransactions();
         unsubAllInvestments();
+        unsubAllLogs();
       };
     }
   }, [isAdmin, user]);
 
   useEffect(() => {
+    let unsubListeners: () => void = () => {};
+
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
+      
+      // Clean up previous listeners
+      unsubListeners();
+      
       if (currentUser) {
         let unsubUser: () => void = () => {};
         let unsubInvestments: () => void = () => {};
@@ -201,19 +246,55 @@ export default function App() {
         let unsubAlerts: () => void = () => {};
 
         const initializeUserData = async () => {
+          if (!currentUser) return;
           try {
             const userRef = doc(db, 'users', currentUser.uid);
             const userSnap = await getDoc(userRef);
 
             if (!userSnap.exists()) {
-              const newUserData = {
+              const urlParams = new URLSearchParams(window.location.search);
+              const referredBy = urlParams.get('ref');
+              
+              const newUserData: any = {
                 uid: currentUser.uid,
                 email: currentUser.email,
                 displayName: currentUser.displayName,
                 balance: 10.00, // البونص
                 hasReceivedBonus: true,
+                kycStatus: 'unverified',
+                referralCount: 0,
                 createdAt: new Date().toISOString()
               };
+
+              if (referredBy) {
+                newUserData.referredBy = referredBy;
+                // Update referrer
+                try {
+                  await runTransaction(db, async (transaction) => {
+                    const referrerRef = doc(db, 'users', referredBy);
+                    const referrerSnap = await transaction.get(referrerRef);
+                    if (referrerSnap.exists()) {
+                      const referrerData = referrerSnap.data();
+                      const newReferralCount = (referrerData.referralCount || 0) + 1;
+                      transaction.update(referrerRef, { referralCount: newReferralCount });
+                      
+                      if (newReferralCount === 50) {
+                        transaction.update(referrerRef, { balance: (referrerData.balance || 0) + 10 });
+                      }
+                      
+                      const referralRef = doc(collection(db, 'referrals'));
+                      transaction.set(referralRef, {
+                        referrerId: referredBy,
+                        referredUserId: currentUser.uid,
+                        timestamp: serverTimestamp()
+                      });
+                    }
+                  });
+                } catch (e) {
+                  console.error('Error updating referrer:', e);
+                }
+              }
+
               await setDoc(userRef, newUserData);
               setUserData(newUserData);
               setEditName(currentUser.displayName || '');
@@ -286,7 +367,7 @@ export default function App() {
 
         initializeUserData();
 
-        return () => {
+        unsubListeners = () => {
           unsubUser();
           unsubInvestments();
           unsubTransactions();
@@ -301,13 +382,51 @@ export default function App() {
       }
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      unsubListeners();
+    };
   }, []);
+
+  const handleCancelInvestment = async (investment: any) => {
+    if (!user || !userData) return;
+    
+    const investmentDate = investment.timestamp?.toDate ? investment.timestamp.toDate() : new Date(investment.timestamp);
+    const now = new Date();
+    const diffInDays = (now.getTime() - investmentDate.getTime()) / (1000 * 60 * 60 * 24);
+
+    if (diffInDays < 30) {
+      setStatus({ type: 'error', message: 'لا يمكن إلغاء الاستثمار إلا بعد مرور 30 يوماً' });
+      return;
+    }
+
+    try {
+      const profit = calculateProfit(investment.amount, investment.timestamp);
+      const totalRefund = investment.amount + profit;
+
+      // حذف الاستثمار
+      await deleteDoc(doc(db, 'investments', investment.id));
+
+      // إعادة المبلغ والأرباح للمحفظة
+      const userRef = doc(db, 'users', user.uid);
+      await setDoc(userRef, { balance: userData.balance + totalRefund }, { merge: true });
+
+      await logEvent(user.uid, 'استثمار', `تم إلغاء الاستثمار في ${investment.sector} واسترداد ${totalRefund.toFixed(2)}$`);
+      setStatus({ type: 'success', message: `تم إلغاء الاستثمار بنجاح واسترداد ${totalRefund.toFixed(2)}$` });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'investments');
+      setStatus({ type: 'error', message: 'حدث خطأ أثناء إلغاء الاستثمار' });
+    }
+  };
 
   const handleInvest = async (sector: string, amount: number) => {
     if (!user || !userData) return;
-    if (amount < 10) {
-      setStatus({ type: 'error', message: 'الحد الأدنى للاستثمار هو 10$' });
+    if (sector !== 'العقار' && amount < 100) {
+      setStatus({ type: 'error', message: `الحد الأدنى للاستثمار في ${sector} هو 100$، لقد حاولت استثمار ${amount}$` });
+      return;
+    }
+    if (sector === 'العقار' && amount < 10) {
+      setStatus({ type: 'error', message: `الحد الأدنى للاستثمار في ${sector} هو 10$، لقد حاولت استثمار ${amount}$` });
       return;
     }
     if (userData.balance < amount) {
@@ -357,7 +476,8 @@ export default function App() {
       setAmountInput('');
       setBinanceId('');
       setConfirmModal(null);
-      setStatus({ type: 'success', message: `تم طلب إيداع ${amount}$ بنجاح. بانتظار موافقة الإدارة.` });
+      const methodText = paymentMethod === 'binance' ? 'عبر Binance Pay' : 'عبر التحويل البنكي';
+      setStatus({ type: 'success', message: `تم تسجيل طلب إيداع بمبلغ ${amount}$ ${methodText}. سيتم إضافة الرصيد بعد مراجعة الإدارة.` });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'transactions');
       setStatus({ type: 'error', message: 'حدث خطأ أثناء طلب الإيداع' });
@@ -366,6 +486,10 @@ export default function App() {
 
   const handleWithdraw = async () => {
     if (!user || !userData || !amountInput) return;
+    if (userData.kycStatus !== 'verified') {
+      setStatus({ type: 'error', message: 'يجب توثيق هويتك (KYC) أولاً لتتمكن من السحب' });
+      return;
+    }
     const amount = parseFloat(amountInput);
     if (isNaN(amount) || amount <= 0) {
       setStatus({ type: 'error', message: 'يرجى إدخال مبلغ صحيح' });
@@ -385,6 +509,10 @@ export default function App() {
   const executeWithdraw = async (amount: number) => {
     if (!user || !userData) return;
     try {
+      // Deduct balance immediately
+      const userRef = doc(db, 'users', user.uid);
+      await setDoc(userRef, { balance: userData.balance - amount }, { merge: true });
+
       await addDoc(collection(db, 'transactions'), {
         userId: user.uid,
         type: 'withdrawal',
@@ -398,10 +526,40 @@ export default function App() {
       setAmountInput('');
       setBinanceId('');
       setConfirmModal(null);
-      setStatus({ type: 'success', message: `تم طلب سحب ${amount}$ بنجاح. بانتظار موافقة الإدارة.` });
+      const methodText = paymentMethod === 'binance' ? 'إلى حساب Binance Pay الخاص بك' : 'إلى حسابك البنكي';
+      setStatus({ type: 'success', message: `تم تسجيل طلب سحب بمبلغ ${amount}$ ${methodText}. سيتم تحويل المبلغ بعد مراجعة الإدارة.` });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'transactions');
       setStatus({ type: 'error', message: 'حدث خطأ أثناء طلب السحب' });
+    }
+  };
+
+  const handleClaimProfits = async () => {
+    if (!user || !userData) return;
+    
+    // Calculate total profits
+    const totalProfits = investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp), 0);
+    
+    if (totalProfits <= 0) {
+      setStatus({ type: 'error', message: 'لا توجد أرباح متاحة للسحب حالياً' });
+      return;
+    }
+
+    try {
+      // Update user balance
+      const userRef = doc(db, 'users', user.uid);
+      await setDoc(userRef, { balance: userData.balance + totalProfits }, { merge: true });
+
+      // Reset investment timestamps to now
+      for (const inv of investments) {
+        const invRef = doc(db, 'investments', inv.id);
+        await setDoc(invRef, { timestamp: serverTimestamp() }, { merge: true });
+      }
+
+      setStatus({ type: 'success', message: `تم إضافة ${totalProfits.toFixed(2)}$ إلى محفظتك بنجاح` });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'investments');
+      setStatus({ type: 'error', message: 'حدث خطأ أثناء تحويل الأرباح' });
     }
   };
 
@@ -434,6 +592,52 @@ export default function App() {
     }
   };
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || e.target.files.length === 0 || !user) return;
+    const file = e.target.files[0];
+    setUploading(true);
+    try {
+      const storageRef = ref(storage, `kyc/${user.uid}/${file.name}`);
+      await uploadBytes(storageRef, file);
+      const url = await getDownloadURL(storageRef);
+      setKycDocumentUrl(url);
+      setStatus({ type: 'success', message: 'تم رفع المستند بنجاح' });
+    } catch (error) {
+      console.error('Error uploading file:', error);
+      setStatus({ type: 'error', message: 'حدث خطأ أثناء رفع المستند' });
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleSubmitKyc = async () => {
+    if (!user) return;
+    if (!kycDocumentNumber.trim() || !kycFullName.trim() || !kycNationality.trim() || !kycDob.trim() || !kycDocumentUrl) {
+      setStatus({ type: 'error', message: 'يرجى تعبئة جميع حقول التحقق من الهوية ورفع المستند' });
+      return;
+    }
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      await setDoc(userRef, {
+        kycStatus: 'pending',
+        kycData: {
+          documentType: kycDocumentType,
+          documentNumber: kycDocumentNumber,
+          fullName: kycFullName,
+          nationality: kycNationality,
+          dob: kycDob,
+          documentUrl: kycDocumentUrl,
+          submittedAt: serverTimestamp()
+        }
+      }, { merge: true });
+      await logEvent(user.uid, 'KYC', 'تم تقديم طلب تحقق جديد مع مستند');
+      setStatus({ type: 'success', message: 'تم إرسال طلب التحقق من الهوية بنجاح. قيد المراجعة.' });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}`);
+      setStatus({ type: 'error', message: 'حدث خطأ أثناء تقديم طلب التحقق' });
+    }
+  };
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     setCopied(true);
@@ -449,6 +653,53 @@ export default function App() {
     // الربح 0.5% يومياً
     return amount * 0.005 * diffInDays;
   };
+
+  const AdminLogsScreen = () => {
+    const [logsPage, setLogsPage] = useState(1);
+    const itemsPerPage = 10;
+    const sortedLogs = [...logs].sort((a, b) => b.timestamp?.toDate() - a.timestamp?.toDate());
+    const paginatedLogs = sortedLogs.slice((logsPage - 1) * itemsPerPage, logsPage * itemsPerPage);
+    const totalPages = Math.ceil(sortedLogs.length / itemsPerPage);
+
+    return (
+      <div className="space-y-4">
+        <h3 className="font-bold text-blue-900 dark:text-white flex items-center gap-2">
+          <ShieldCheck className="w-5 h-5" /> سجل الأحداث الكامل
+        </h3>
+        <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
+          <table className="w-full text-xs text-right">
+            <thead>
+              <tr className="border-b border-gray-100 dark:border-gray-700">
+                <th className="py-2">التاريخ</th>
+                <th className="py-2">النوع</th>
+                <th className="py-2">الحدث</th>
+              </tr>
+            </thead>
+            <tbody>
+              {paginatedLogs.map(log => (
+                <tr key={log.id} className="border-b border-gray-100 dark:border-gray-700">
+                  <td className="py-2 text-gray-400">{log.timestamp?.toDate ? new Intl.DateTimeFormat('ar-EG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(log.timestamp.toDate()) : '...'}</td>
+                  <td className="py-2 font-bold text-blue-600 dark:text-blue-400">{log.type}</td>
+                  <td className="py-2 dark:text-white">{log.message}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="flex justify-between items-center mt-4">
+            <button onClick={() => setLogsPage(p => Math.max(1, p - 1))} disabled={logsPage === 1} className="px-3 py-1 bg-gray-100 dark:bg-gray-700 rounded-lg text-xs">السابق</button>
+            <span className="text-xs dark:text-white">صفحة {logsPage} من {totalPages}</span>
+            <button onClick={() => setLogsPage(p => Math.min(totalPages, p + 1))} disabled={logsPage === totalPages} className="px-3 py-1 bg-gray-100 dark:bg-gray-700 rounded-lg text-xs">التالي</button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const AdminDashboardContent = () => (
+    <div className="space-y-6">
+      {/* ... existing admin dashboard content ... */}
+    </div>
+  );
 
   const handleUpdateBalance = async (userId: string, newBalance: number) => {
     try {
@@ -472,11 +723,13 @@ export default function App() {
       
       const userData = userSnap.data();
       const currentBalance = userData.balance || 0;
-      const newBalance = transaction.type === 'deposit' 
-        ? currentBalance + transaction.amount 
-        : currentBalance - transaction.amount;
-
-      if (newBalance < 0) throw new Error('رصيد المستخدم غير كافٍ لإتمام العملية');
+      
+      let newBalance = currentBalance;
+      if (transaction.type === 'deposit') {
+        newBalance = currentBalance + transaction.amount;
+        // تحديث رصيد المستخدم فقط في حالة الإيداع
+        await setDoc(userRef, { balance: newBalance }, { merge: true });
+      }
 
       // تحديث حالة المعاملة
       await setDoc(doc(db, 'transactions', transaction.id), { 
@@ -484,9 +737,6 @@ export default function App() {
         processedAt: serverTimestamp(),
         processedBy: user?.uid
       }, { merge: true });
-      
-      // تحديث رصيد المستخدم
-      await setDoc(userRef, { balance: newBalance }, { merge: true });
 
       const title = transaction.type === 'deposit' ? 'تم تأكيد الإيداع' : 'تم تأكيد السحب';
       const message = `لقد تمت الموافقة على عملية ${transaction.type === 'deposit' ? 'إيداع' : 'سحب'} مبلغ ${transaction.amount}$ بنجاح. رصيدك الجديد هو ${newBalance.toFixed(2)}$`;
@@ -532,6 +782,16 @@ export default function App() {
       if (!transSnap.exists()) throw new Error('المعاملة غير موجودة');
       const transaction = transSnap.data();
 
+      // Refund balance if it was a withdrawal
+      if (transaction.type === 'withdrawal') {
+        const userRef = doc(db, 'users', transaction.userId);
+        const userSnap = await getDoc(userRef);
+        if (userSnap.exists()) {
+          const userData = userSnap.data();
+          await setDoc(userRef, { balance: (userData.balance || 0) + transaction.amount }, { merge: true });
+        }
+      }
+
       await setDoc(transRef, { 
         status: 'rejected',
         processedAt: serverTimestamp(),
@@ -549,6 +809,8 @@ export default function App() {
         read: false,
         timestamp: serverTimestamp()
       });
+
+      await logEvent(user?.uid || null, 'معاملة', `تم رفض ${transaction.type === 'deposit' ? 'إيداع' : 'سحب'} مبلغ ${transaction.amount}$ للمستخدم ${transaction.userId}`);
 
       // إرسال بريد إلكتروني (EmailJS)
       const userRef = doc(db, 'users', transaction.userId);
@@ -574,6 +836,42 @@ export default function App() {
       console.error('Error in handleRejectTransaction:', error);
       handleFirestoreError(error, OperationType.WRITE, `transactions/${transactionId}`);
       setStatus({ type: 'error', message: error.message || 'فشل رفض المعاملة' });
+    }
+  };
+
+  const handleApproveKyc = async (userId: string) => {
+    try {
+      await setDoc(doc(db, 'users', userId), { kycStatus: 'verified' }, { merge: true });
+      await addDoc(collection(db, 'notifications'), {
+        userId,
+        title: 'تم التحقق من الهوية',
+        message: 'تمت الموافقة على طلب التحقق من الهوية الخاص بك بنجاح.',
+        read: false,
+        timestamp: serverTimestamp()
+      });
+      await logEvent(user?.uid || null, 'KYC', `تمت الموافقة على طلب التحقق من الهوية للمستخدم ${userId}`);
+      setStatus({ type: 'success', message: 'تمت الموافقة على طلب التحقق من الهوية' });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `users/${userId}`);
+      setStatus({ type: 'error', message: 'حدث خطأ أثناء الموافقة على الطلب' });
+    }
+  };
+
+  const handleRejectKyc = async (userId: string) => {
+    try {
+      await setDoc(doc(db, 'users', userId), { kycStatus: 'rejected' }, { merge: true });
+      await addDoc(collection(db, 'notifications'), {
+        userId,
+        title: 'تحديث حالة التحقق من الهوية',
+        message: 'تم رفض طلب التحقق من الهوية الخاص بك. يرجى مراجعة البيانات وإعادة التقديم.',
+        read: false,
+        timestamp: serverTimestamp()
+      });
+      await logEvent(user?.uid || null, 'KYC', `تم رفض طلب التحقق من الهوية للمستخدم ${userId}`);
+      setStatus({ type: 'success', message: 'تم رفض طلب التحقق من الهوية' });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `users/${userId}`);
+      setStatus({ type: 'error', message: 'حدث خطأ أثناء رفض الطلب' });
     }
   };
 
@@ -622,6 +920,7 @@ export default function App() {
       risk: 'منخفض',
       returns: 'عائد يومي ثابت',
       icon: TrendingUp,
+      image: 'https://picsum.photos/seed/dubai-real-estate/800/400',
       history: [
         { month: 'يناير', value: 100 },
         { month: 'فبراير', value: 105 },
@@ -629,16 +928,18 @@ export default function App() {
         { month: 'أبريل', value: 112 },
         { month: 'مايو', value: 115 },
         { month: 'يونيو', value: 120 }
-      ]
+      ],
+      minInvestment: 10
     },
     {
       id: 'صناعة',
       name: 'صناعة',
       description: 'دعم القطاع الصناعي والتحويلي المتنامي في المناطق الحرة.',
-      performance: '0.5% يومياً',
+      performance: '0.7% يومياً',
       risk: 'متوسط',
       returns: 'عائد يومي ثابت',
       icon: TrendingUp,
+      image: 'https://picsum.photos/seed/industry-factory/800/400',
       history: [
         { month: 'يناير', value: 100 },
         { month: 'فبراير', value: 102 },
@@ -646,16 +947,18 @@ export default function App() {
         { month: 'أبريل', value: 108 },
         { month: 'مايو', value: 118 },
         { month: 'يونيو', value: 125 }
-      ]
+      ],
+      minInvestment: 100
     },
     {
       id: 'أصول',
       name: 'أصول (ذهب/فضة)',
       description: 'حماية ثروتك من خلال الاستثمار في المعادن الثمينة والأصول الآمنة.',
-      performance: '0.5% يومياً',
+      performance: '0.9% يومياً',
       risk: 'منخفض جداً',
       returns: 'عائد يومي ثابت',
       icon: TrendingUp,
+      image: 'https://picsum.photos/seed/gold-wealth/800/400',
       history: [
         { month: 'يناير', value: 100 },
         { month: 'فبراير', value: 101 },
@@ -663,16 +966,18 @@ export default function App() {
         { month: 'أبريل', value: 104 },
         { month: 'مايو', value: 106 },
         { month: 'يونيو', value: 108 }
-      ]
+      ],
+      minInvestment: 100
     },
     {
       id: 'طاقة',
       name: 'طاقة',
       description: 'الاستثمار في مشاريع الطاقة المتجددة والنفط والغاز.',
-      performance: '0.5% يومياً',
+      performance: '1% يومياً',
       risk: 'متوسط',
       returns: 'عائد يومي ثابت',
       icon: TrendingUp,
+      image: 'https://picsum.photos/seed/renewable-energy/800/400',
       history: [
         { month: 'يناير', value: 100 },
         { month: 'فبراير', value: 108 },
@@ -680,7 +985,8 @@ export default function App() {
         { month: 'أبريل', value: 112 },
         { month: 'مايو', value: 125 },
         { month: 'يونيو', value: 135 }
-      ]
+      ],
+      minInvestment: 100
     }
   ];
 
@@ -862,6 +1168,16 @@ export default function App() {
                         <div className="text-right">
                           <p className="text-sm font-bold text-green-600 dark:text-green-400">+{profit.toFixed(4)}$</p>
                           <p className="text-[10px] text-gray-400">الربح المتراكم</p>
+                          
+                          {/* زر الإلغاء */}
+                          {(Date.now() - (inv.timestamp?.seconds * 1000 || new Date(inv.timestamp).getTime())) / (1000 * 60 * 60 * 24) >= 30 && (
+                            <button
+                              onClick={() => handleCancelInvestment(inv)}
+                              className="mt-2 text-[10px] bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 px-2 py-1 rounded-md hover:bg-red-100 transition-colors"
+                            >
+                              إلغاء الاستثمار
+                            </button>
+                          )}
                         </div>
                       </div>
                     );
@@ -877,123 +1193,182 @@ export default function App() {
             <h2 className="text-xl font-bold text-blue-900 dark:text-white">فرص الاستثمار</h2>
             
             {selectedSector ? (
-              <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700 space-y-6 animate-in fade-in zoom-in duration-300">
-                <div className="flex items-center gap-4">
-                  <button onClick={() => setSelectedSector(null)} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full transition-colors">
-                    <ChevronRight className="w-6 h-6 text-blue-600" />
-                  </button>
-                  <h3 className="text-xl font-bold text-blue-900 dark:text-white">{selectedSector.name}</h3>
+              <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700 overflow-hidden animate-in fade-in zoom-in duration-300">
+                <div className="h-48 w-full relative">
+                  <img src={selectedSector.image} alt={selectedSector.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent flex flex-col justify-end p-6">
+                    <div className="flex items-center gap-4">
+                      <button onClick={() => setSelectedSector(null)} className="p-2 bg-white/20 hover:bg-white/30 backdrop-blur-sm rounded-full transition-colors">
+                        <ChevronRight className="w-6 h-6 text-white" />
+                      </button>
+                      <h3 className="text-2xl font-bold text-white">{selectedSector.name}</h3>
+                    </div>
+                  </div>
                 </div>
                 
-                <div className="bg-blue-50 dark:bg-blue-900/10 p-4 rounded-xl">
-                  <p className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed">
-                    {selectedSector.description}
-                  </p>
-                </div>
-
-                {/* مخطط الأداء التاريخي للقطاع */}
-                <div className="space-y-3">
-                  <h4 className="font-bold text-sm text-gray-500 dark:text-gray-400">الأداء التاريخي (آخر 6 أشهر)</h4>
-                  <div className="h-48 w-full bg-gray-50 dark:bg-gray-700/30 rounded-xl p-2">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={selectedSector.history}>
-                        <defs>
-                          <linearGradient id="colorSector" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#2563eb" stopOpacity={0.3}/>
-                            <stop offset="95%" stopColor="#2563eb" stopOpacity={0}/>
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode ? '#374151' : '#e5e7eb'} />
-                        <XAxis dataKey="month" fontSize={10} tick={{ fill: isDarkMode ? '#9ca3af' : '#6b7280' }} />
-                        <YAxis hide domain={['dataMin - 5', 'dataMax + 5']} />
-                        <Tooltip 
-                          contentStyle={{ 
-                            backgroundColor: isDarkMode ? '#1f2937' : '#ffffff',
-                            borderColor: isDarkMode ? '#374151' : '#e5e7eb',
-                            color: isDarkMode ? '#ffffff' : '#000000',
-                            borderRadius: '8px',
-                            fontSize: '10px'
-                          }}
-                        />
-                        <Area type="monotone" dataKey="value" stroke="#2563eb" fillOpacity={1} fill="url(#colorSector)" strokeWidth={2} />
-                      </AreaChart>
-                    </ResponsiveContainer>
+                <div className="p-6 space-y-6">
+                  <div className="bg-blue-50 dark:bg-blue-900/10 p-4 rounded-xl">
+                    <p className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed">
+                      {selectedSector.description}
+                    </p>
                   </div>
-                </div>
 
-                <div className="space-y-4">
-                  <h4 className="font-bold text-sm text-gray-500 dark:text-gray-400">تحليل الاستثمار</h4>
-                  <div className="grid grid-cols-1 gap-3">
-                    <div className="bg-white dark:bg-gray-700 p-4 rounded-xl border border-gray-100 dark:border-gray-600 flex justify-between items-center shadow-sm">
-                      <div className="flex items-center gap-2">
-                        <ChartIcon className="w-4 h-4 text-blue-500" />
-                        <span className="text-sm dark:text-gray-300">الأداء التاريخي</span>
-                      </div>
-                      <span className="font-bold text-blue-600 dark:text-blue-400">{selectedSector.performance} سنوياً</span>
-                    </div>
-                    <div className="bg-white dark:bg-gray-700 p-4 rounded-xl border border-gray-100 dark:border-gray-600 flex justify-between items-center shadow-sm">
-                      <div className="flex items-center gap-2">
-                        <Award className="w-4 h-4 text-yellow-500" />
-                        <span className="text-sm dark:text-gray-300">تقييم المخاطر</span>
-                      </div>
-                      <span className={`font-bold ${selectedSector.risk === 'منخفض' ? 'text-green-600' : selectedSector.risk === 'مرتفع' ? 'text-red-600' : 'text-yellow-600'}`}>
-                        {selectedSector.risk}
-                      </span>
-                    </div>
-                    <div className="bg-white dark:bg-gray-700 p-4 rounded-xl border border-gray-100 dark:border-gray-600 flex justify-between items-center shadow-sm">
-                      <div className="flex items-center gap-2">
-                        <DollarSign className="w-4 h-4 text-green-500" />
-                        <span className="text-sm dark:text-gray-300">العوائد المتوقعة</span>
-                      </div>
-                      <span className="font-bold text-green-600 dark:text-green-400">{selectedSector.returns}</span>
+                  {/* مخطط الأداء التاريخي للقطاع */}
+                  <div className="space-y-3">
+                    <h4 className="font-bold text-sm text-gray-500 dark:text-gray-400">الأداء التاريخي (آخر 6 أشهر)</h4>
+                    <div className="h-48 w-full bg-gray-50 dark:bg-gray-700/30 rounded-xl p-2">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={selectedSector.history}>
+                          <defs>
+                            <linearGradient id="colorSector" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor="#2563eb" stopOpacity={0.3}/>
+                              <stop offset="95%" stopColor="#2563eb" stopOpacity={0}/>
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode ? '#374151' : '#e5e7eb'} />
+                          <XAxis dataKey="month" fontSize={10} tick={{ fill: isDarkMode ? '#9ca3af' : '#6b7280' }} />
+                          <YAxis hide domain={['dataMin - 5', 'dataMax + 5']} />
+                          <Tooltip 
+                            contentStyle={{ 
+                              backgroundColor: isDarkMode ? '#1f2937' : '#ffffff',
+                              borderColor: isDarkMode ? '#374151' : '#e5e7eb',
+                              color: isDarkMode ? '#ffffff' : '#000000',
+                              borderRadius: '8px',
+                              fontSize: '10px'
+                            }}
+                          />
+                          <Area type="monotone" dataKey="value" stroke="#2563eb" fillOpacity={1} fill="url(#colorSector)" strokeWidth={2} />
+                        </AreaChart>
+                      </ResponsiveContainer>
                     </div>
                   </div>
-                </div>
 
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">المبلغ المراد استثماره ($)</label>
-                    <input
-                      type="number"
-                      value={investAmountInput}
-                      onChange={(e) => setInvestAmountInput(e.target.value)}
-                      min="10"
-                      placeholder="أدخل المبلغ (الحد الأدنى 10$)"
-                      className="w-full p-4 border border-gray-200 dark:border-gray-600 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 dark:text-white font-bold"
-                    />
+                  <div className="space-y-4">
+                    <h4 className="font-bold text-sm text-gray-500 dark:text-gray-400">تحليل الاستثمار</h4>
+                    <div className="grid grid-cols-1 gap-3">
+                      <div className="bg-white dark:bg-gray-700 p-4 rounded-xl border border-gray-100 dark:border-gray-600 flex justify-between items-center shadow-sm">
+                        <div className="flex items-center gap-2">
+                          <ChartIcon className="w-4 h-4 text-blue-500" />
+                          <span className="text-sm dark:text-gray-300">الأداء التاريخي</span>
+                        </div>
+                        <span className="font-bold text-blue-600 dark:text-blue-400">{selectedSector.performance} سنوياً</span>
+                      </div>
+                      <div className="bg-white dark:bg-gray-700 p-4 rounded-xl border border-gray-100 dark:border-gray-600 flex justify-between items-center shadow-sm">
+                        <div className="flex items-center gap-2">
+                          <Award className="w-4 h-4 text-yellow-500" />
+                          <span className="text-sm dark:text-gray-300">تقييم المخاطر</span>
+                        </div>
+                        <span className={`font-bold ${selectedSector.risk === 'منخفض' ? 'text-green-600' : selectedSector.risk === 'مرتفع' ? 'text-red-600' : 'text-yellow-600'}`}>
+                          {selectedSector.risk}
+                        </span>
+                      </div>
+                      <div className="bg-white dark:bg-gray-700 p-4 rounded-xl border border-gray-100 dark:border-gray-600 flex justify-between items-center shadow-sm">
+                        <div className="flex items-center gap-2">
+                          <DollarSign className="w-4 h-4 text-green-500" />
+                          <span className="text-sm dark:text-gray-300">العوائد المتوقعة</span>
+                        </div>
+                        <span className="font-bold text-green-600 dark:text-green-400">{selectedSector.returns}</span>
+                      </div>
+                    </div>
                   </div>
-                  <button
-                    onClick={() => {
-                      handleInvest(selectedSector.name, parseFloat(investAmountInput));
-                      setSelectedSector(null);
-                      setInvestAmountInput('10');
-                    }}
-                    className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition-colors shadow-lg shadow-blue-600/20"
-                  >
-                    تأكيد الاستثمار بمبلغ {investAmountInput}$
-                  </button>
+
+                  <div className="space-y-4 pt-4 border-t border-gray-100 dark:border-gray-700">
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">المبلغ المراد استثماره ($)</label>
+                      <input
+                        type="number"
+                        value={investAmountInput}
+                        onChange={(e) => setInvestAmountInput(e.target.value)}
+                        min="10"
+                        placeholder="أدخل المبلغ (الحد الأدنى 100$ للخطط العادية، 10$ للعقار)"
+                        className="w-full p-4 border border-gray-200 dark:border-gray-600 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 dark:text-white font-bold text-lg"
+                      />
+                    </div>
+                    <button
+                      onClick={() => {
+                        handleInvest(selectedSector.name, parseFloat(investAmountInput));
+                        setSelectedSector(null);
+                        setInvestAmountInput('10');
+                      }}
+                      className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition-colors shadow-lg shadow-blue-600/20 text-lg"
+                    >
+                      تأكيد الاستثمار بمبلغ {investAmountInput}$
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : (
               <div className="space-y-6">
-                <div className="grid gap-4">
+                <div className="bg-gradient-to-r from-blue-600 to-blue-800 rounded-2xl p-6 text-white shadow-lg flex items-center justify-between animate-in fade-in slide-in-from-bottom-4 duration-500">
+                  <div>
+                    <p className="text-blue-100 text-sm mb-1 font-medium">إجمالي الأرباح المتراكمة</p>
+                    <h3 className="text-3xl font-bold">
+                      ${investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp), 0).toFixed(2)}
+                    </h3>
+                    <p className="text-xs text-blue-200 mt-2">من جميع استثماراتك النشطة</p>
+                  </div>
+                  <div className="bg-white/20 p-4 rounded-full backdrop-blur-sm">
+                    <TrendingUp className="w-8 h-8 text-white" />
+                  </div>
+                </div>
+
+                <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 shadow-sm border border-gray-100 dark:border-gray-700">
+                  <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-4">نظام الدعوات</h3>
+                  <div className="flex items-center gap-2 mb-2">
+                    <input 
+                      type="text" 
+                      readOnly 
+                      value={`${window.location.origin}/?ref=${user?.uid}`} 
+                      className="w-full p-2 rounded-lg border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 text-sm text-gray-600 dark:text-gray-300"
+                    />
+                    <button 
+                      onClick={() => navigator.clipboard.writeText(`${window.location.origin}/?ref=${user?.uid}`)}
+                      className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                    >
+                      <Copy className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    عدد الدعوات: {userData?.referralCount || 0} / 50
+                  </p>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
                   {sectors.map((item) => (
                     <div 
                       key={item.id} 
                       onClick={() => setSelectedSector(item)}
-                      className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 flex justify-between items-center hover:border-blue-200 dark:hover:border-blue-800 transition-all cursor-pointer group"
+                      className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 hover:border-blue-300 dark:hover:border-blue-700 transition-all cursor-pointer group overflow-hidden flex flex-col"
                     >
-                      <div className="flex items-center gap-3">
-                        <div className="bg-blue-50 dark:bg-blue-900/20 p-2 rounded-lg group-hover:bg-blue-100 dark:group-hover:bg-blue-900/40 transition-colors">
-                          <item.icon className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-                        </div>
-                        <div>
-                          <span className="font-semibold dark:text-white block">{item.name}</span>
-                          <span className="text-[10px] text-gray-400">اضغط لعرض التفاصيل</span>
+                      <div className="h-32 w-full relative overflow-hidden">
+                        <img 
+                          src={item.image} 
+                          alt={item.name} 
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" 
+                          referrerPolicy="no-referrer"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent"></div>
+                        <div className="absolute bottom-3 right-3 flex items-center gap-2">
+                          <div className="bg-white/20 backdrop-blur-md p-1.5 rounded-lg">
+                            <item.icon className="w-4 h-4 text-white" />
+                          </div>
+                          <h3 className="font-bold text-white text-lg">{item.name}</h3>
                         </div>
                       </div>
-                      <div className="bg-blue-600 text-white p-2 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity">
-                        <TrendingUp className="w-4 h-4" />
+                      <div className="p-4 flex-1 flex flex-col justify-between">
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mb-4 line-clamp-2">{item.description}</p>
+                        <div className="flex justify-between items-center pt-3 border-t border-gray-50 dark:border-gray-700/50">
+                          <div className="flex items-center gap-1">
+                            <TrendingUp className="w-3 h-3 text-green-500" />
+                            <span className="text-xs font-bold text-green-600 dark:text-green-400">{item.performance}</span>
+                          </div>
+                          <div className="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                            الحد الأدنى: {item.minInvestment}$
+                          </div>
+                          <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${item.risk === 'منخفض' || item.risk === 'منخفض جداً' ? 'bg-green-50 text-green-600 dark:bg-green-900/20' : item.risk === 'مرتفع' ? 'bg-red-50 text-red-600 dark:bg-red-900/20' : 'bg-yellow-50 text-yellow-600 dark:bg-yellow-900/20'}`}>
+                            مخاطر: {item.risk}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -1093,10 +1468,29 @@ export default function App() {
               </div>
             )}
 
-            <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 text-center space-y-2 transition-colors relative overflow-hidden">
-              <p className="text-gray-500 dark:text-gray-400 font-medium">الرصيد المتاح</p>
-              <p className="text-4xl font-bold text-blue-900 dark:text-blue-400">{userData?.balance.toFixed(2)} $</p>
-              <div className="absolute -bottom-4 -right-4 opacity-5">
+            <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 text-center space-y-4 transition-colors relative overflow-hidden">
+              <div className="space-y-2">
+                <p className="text-gray-500 dark:text-gray-400 font-medium">الرصيد المتاح</p>
+                <p className="text-4xl font-bold text-blue-900 dark:text-blue-400">{userData?.balance.toFixed(2)} $</p>
+              </div>
+              
+              <div className="pt-4 border-t border-gray-100 dark:border-gray-700">
+                <div className="flex justify-between items-center mb-3">
+                  <span className="text-sm text-gray-500 dark:text-gray-400">الأرباح المتراكمة</span>
+                  <span className="font-bold text-green-600 dark:text-green-400">
+                    {investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp), 0).toFixed(4)} $
+                  </span>
+                </div>
+                <button
+                  onClick={handleClaimProfits}
+                  className="w-full bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 py-3 rounded-xl font-bold hover:bg-green-100 transition-colors flex items-center justify-center gap-2"
+                >
+                  <TrendingUp className="w-5 h-5" />
+                  إضافة الأرباح للمحفظة
+                </button>
+              </div>
+
+              <div className="absolute -bottom-4 -right-4 opacity-5 pointer-events-none">
                 <Wallet className="w-24 h-24 text-blue-900" />
               </div>
             </div>
@@ -1104,14 +1498,7 @@ export default function App() {
             <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 space-y-4 transition-colors">
               <div className="space-y-3">
                 <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">وسيلة الدفع</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={() => setPaymentMethod('bank')}
-                    className={`p-3 rounded-xl border-2 flex flex-col items-center gap-1 transition-all ${paymentMethod === 'bank' ? 'border-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-100 dark:border-gray-700'}`}
-                  >
-                    <Wallet className={`w-5 h-5 ${paymentMethod === 'bank' ? 'text-blue-600' : 'text-gray-400'}`} />
-                    <span className={`text-[10px] font-bold ${paymentMethod === 'bank' ? 'text-blue-600' : 'text-gray-500'}`}>حساب بنكي</span>
-                  </button>
+                <div className="grid grid-cols-1 gap-2">
                   <button
                     onClick={() => setPaymentMethod('binance')}
                     className={`p-3 rounded-xl border-2 flex flex-col items-center gap-1 transition-all ${paymentMethod === 'binance' ? 'border-yellow-500 bg-yellow-50 dark:bg-yellow-900/20' : 'border-gray-100 dark:border-gray-700'}`}
@@ -1162,7 +1549,10 @@ export default function App() {
               )}
 
               <div className="space-y-2">
-                <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">المبلغ ($)</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">المبلغ ($)</label>
+                  <span className="text-[10px] text-red-500 font-bold">الحد الأدنى للسحب: 50$</span>
+                </div>
                 <input
                   type="number"
                   value={amountInput}
@@ -1384,6 +1774,29 @@ export default function App() {
                       </div>
                     )}
                   </div>
+                  <label className="absolute bottom-0 right-0 p-2 bg-blue-600 text-white rounded-full cursor-pointer hover:bg-blue-700 shadow-lg">
+                    <Plus className="w-4 h-4" />
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={async (e) => {
+                        if (e.target.files && e.target.files[0] && user) {
+                          const file = e.target.files[0];
+                          try {
+                            const storageRef = ref(storage, `profiles/${user.uid}/${file.name}`);
+                            await uploadBytes(storageRef, file);
+                            const url = await getDownloadURL(storageRef);
+                            setEditPhotoURL(url);
+                            setStatus({ type: 'success', message: 'تم تحديث الصورة بنجاح' });
+                          } catch (error) {
+                            console.error('Error uploading profile photo:', error);
+                            setStatus({ type: 'error', message: 'حدث خطأ أثناء رفع الصورة' });
+                          }
+                        }
+                      }}
+                    />
+                  </label>
                 </div>
                 
                 <div className="text-center">
@@ -1461,6 +1874,142 @@ export default function App() {
               </div>
             </div>
 
+            {/* KYC Section */}
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 transition-colors space-y-6">
+              <div className="flex items-center justify-between">
+                <h3 className="font-bold text-blue-900 dark:text-white flex items-center gap-2">
+                  <ShieldCheck className="w-5 h-5 text-blue-500" />
+                  التحقق من الهوية (KYC)
+                </h3>
+                {userData?.kycStatus === 'verified' && (
+                  <span className="px-3 py-1 bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 text-xs font-bold rounded-full flex items-center gap-1">
+                    <CheckCircle2 className="w-4 h-4" /> موثق
+                  </span>
+                )}
+                {userData?.kycStatus === 'pending' && (
+                  <span className="px-3 py-1 bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400 text-xs font-bold rounded-full">
+                    قيد المراجعة
+                  </span>
+                )}
+                {userData?.kycStatus === 'rejected' && (
+                  <span className="px-3 py-1 bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 text-xs font-bold rounded-full">
+                    مرفوض
+                  </span>
+                )}
+                {(!userData?.kycStatus || userData?.kycStatus === 'unverified') && (
+                  <span className="px-3 py-1 bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300 text-xs font-bold rounded-full">
+                    غير موثق
+                  </span>
+                )}
+              </div>
+
+              {userData?.kycStatus === 'verified' ? (
+                <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-xl border border-green-100 dark:border-green-800/30 text-center">
+                  <CheckCircle2 className="w-12 h-12 text-green-500 mx-auto mb-2" />
+                  <p className="text-green-800 dark:text-green-400 font-bold">هويتك موثقة بنجاح</p>
+                  <p className="text-xs text-green-600 dark:text-green-500 mt-1">يمكنك الآن الاستمتاع بجميع ميزات المنصة بدون قيود.</p>
+                </div>
+              ) : userData?.kycStatus === 'pending' ? (
+                <div className="bg-yellow-50 dark:bg-yellow-900/20 p-4 rounded-xl border border-yellow-100 dark:border-yellow-800/30 text-center">
+                  <ShieldCheck className="w-12 h-12 text-yellow-500 mx-auto mb-2 animate-pulse" />
+                  <p className="text-yellow-800 dark:text-yellow-400 font-bold">جاري مراجعة بياناتك</p>
+                  <p className="text-xs text-yellow-600 dark:text-yellow-500 mt-1">سنقوم بإعلامك فور الانتهاء من مراجعة طلبك.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {userData?.kycStatus === 'rejected' && (
+                    <div className="bg-red-50 dark:bg-red-900/20 p-3 rounded-lg text-sm text-red-700 dark:text-red-400 mb-4">
+                      تم رفض طلبك السابق. يرجى التأكد من صحة البيانات وإعادة التقديم.
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">نوع المستند</label>
+                    <select
+                      value={kycDocumentType}
+                      onChange={(e) => setKycDocumentType(e.target.value)}
+                      className="w-full p-3 border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 dark:text-white"
+                    >
+                      <option value="national_id">بطاقة هوية وطنية</option>
+                      <option value="passport">جواز سفر</option>
+                      <option value="driving_license">رخصة قيادة</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">الاسم الكامل (كما في المستند)</label>
+                    <input
+                      type="text"
+                      value={kycFullName}
+                      onChange={(e) => setKycFullName(e.target.value)}
+                      placeholder="الاسم الكامل"
+                      className="w-full p-3 border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 dark:text-white"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">رقم المستند</label>
+                    <input
+                      type="text"
+                      value={kycDocumentNumber}
+                      onChange={(e) => setKycDocumentNumber(e.target.value)}
+                      placeholder="أدخل رقم المستند"
+                      className="w-full p-3 border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 dark:text-white"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">تحميل صورة المستند</label>
+                    <input
+                      type="file"
+                      accept="image/*,.pdf"
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files[0]) {
+                          setStatus({ type: 'success', message: 'تم اختيار الملف: ' + e.target.files[0].name });
+                        }
+                      }}
+                      className="w-full p-3 border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 dark:text-white"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">الجنسية</label>
+                      <input
+                        type="text"
+                        value={kycNationality}
+                        onChange={(e) => setKycNationality(e.target.value)}
+                        placeholder="مثال: إماراتي"
+                        className="w-full p-3 border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 dark:text-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">تاريخ الميلاد</label>
+                      <input
+                        type="date"
+                        value={kycDob}
+                        onChange={(e) => setKycDob(e.target.value)}
+                        className="w-full p-3 border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 dark:text-white"
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold text-gray-600 dark:text-gray-400">صورة المستند</label>
+                    <input
+                      type="file"
+                      onChange={handleFileUpload}
+                      className="w-full p-3 border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 dark:text-white"
+                      disabled={uploading}
+                    />
+                    {uploading && <p className="text-xs text-blue-500">جاري الرفع...</p>}
+                    {kycDocumentUrl && <p className="text-xs text-green-500">تم رفع المستند بنجاح</p>}
+                  </div>
+                  <button
+                    onClick={handleSubmitKyc}
+                    className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-600/20 mt-4"
+                    disabled={uploading}
+                  >
+                    {uploading ? 'جاري الرفع...' : 'تقديم طلب التحقق'}
+                  </button>
+                </div>
+              )}
+            </div>
+
             <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 space-y-4">
               <h3 className="font-bold text-blue-900 dark:text-white">إعدادات الحساب</h3>
               <div className="space-y-2">
@@ -1490,11 +2039,18 @@ export default function App() {
             <div className="flex justify-between items-center">
               <h2 className="text-xl font-bold text-blue-900 dark:text-white flex items-center gap-2">
                 <ShieldCheck className="w-6 h-6 text-red-600" />
-                لوحة تحكم المدير
+                {adminView === 'dashboard' ? 'لوحة تحكم المدير' : 'سجل الأحداث'}
               </h2>
+              <button 
+                onClick={() => setAdminView(adminView === 'dashboard' ? 'logs' : 'dashboard')}
+                className="px-4 py-2 bg-blue-600 text-white rounded-xl text-sm font-bold hover:bg-blue-700"
+              >
+                {adminView === 'dashboard' ? 'عرض سجل الأحداث' : 'العودة للوحة التحكم'}
+              </button>
             </div>
 
-            {/* إحصائيات سريعة */}
+            <div style={{ display: adminView === 'dashboard' ? 'block' : 'none' }}>
+              {/* إحصائيات سريعة */}
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
                 <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 mb-1">
@@ -1509,10 +2065,73 @@ export default function App() {
                   <span className="text-xs">إجمالي الإيداعات</span>
                 </div>
                 <p className="text-xl font-bold text-green-600">
-                  {allTransactions.filter(t => t.type === 'deposit').reduce((acc, curr) => acc + curr.amount, 0).toFixed(2)} $
+                  {allTransactions.filter(t => t.type === 'deposit' && t.status === 'approved').reduce((acc, curr) => acc + curr.amount, 0).toFixed(2)} $
+                </p>
+              </div>
+              <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
+                <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 mb-1">
+                  <TrendingUp className="w-4 h-4" />
+                  <span className="text-xs">حجم الاستثمارات</span>
+                </div>
+                <p className="text-xl font-bold text-blue-600">
+                  {allInvestments.reduce((acc, curr) => acc + curr.amount, 0).toFixed(2)} $
+                </p>
+              </div>
+              <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
+                <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 mb-1">
+                  <Wallet className="w-4 h-4" />
+                  <span className="text-xs">إجمالي السحوبات</span>
+                </div>
+                <p className="text-xl font-bold text-red-600">
+                  {allTransactions.filter(t => t.type === 'withdrawal' && t.status === 'approved').reduce((acc, curr) => acc + curr.amount, 0).toFixed(2)} $
                 </p>
               </div>
             </div>
+
+            {/* الرسوم البيانية */}
+            <div className="space-y-4">
+              <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
+                <h3 className="font-bold text-blue-900 dark:text-white mb-4 text-sm">نمو الاستثمارات والإيداعات</h3>
+                <div className="h-48 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={[
+                      { name: 'يناير', investments: 1200, deposits: 1500 },
+                      { name: 'فبراير', investments: 1900, deposits: 2200 },
+                      { name: 'مارس', investments: 2400, deposits: 2800 },
+                      { name: 'أبريل', investments: 3100, deposits: 3500 },
+                      { name: 'مايو', investments: 4000, deposits: 4200 },
+                      { name: 'الحالي', investments: allInvestments.reduce((acc, curr) => acc + curr.amount, 0) + 4000, deposits: allTransactions.filter(t => t.type === 'deposit' && t.status === 'approved').reduce((acc, curr) => acc + curr.amount, 0) + 4200 }
+                    ]}>
+                      <defs>
+                        <linearGradient id="colorInv" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#2563eb" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#2563eb" stopOpacity={0}/>
+                        </linearGradient>
+                        <linearGradient id="colorDep" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#16a34a" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#16a34a" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode ? '#374151' : '#f3f4f6'} />
+                      <XAxis dataKey="name" fontSize={10} tick={{ fill: isDarkMode ? '#9ca3af' : '#6b7280' }} />
+                      <YAxis hide />
+                      <Tooltip 
+                        contentStyle={{ 
+                          backgroundColor: isDarkMode ? '#1f2937' : '#ffffff',
+                          borderColor: isDarkMode ? '#374151' : '#e5e7eb',
+                          color: isDarkMode ? '#ffffff' : '#000000',
+                          borderRadius: '8px',
+                          fontSize: '12px'
+                        }}
+                      />
+                      <Area type="monotone" dataKey="investments" name="الاستثمارات" stroke="#2563eb" fillOpacity={1} fill="url(#colorInv)" strokeWidth={2} />
+                      <Area type="monotone" dataKey="deposits" name="الإيداعات" stroke="#16a34a" fillOpacity={1} fill="url(#colorDep)" strokeWidth={2} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
+
 
             {/* إدارة المستخدمين */}
             <div className="space-y-4">
@@ -1548,7 +2167,12 @@ export default function App() {
                         <ChevronRight className="w-6 h-6 text-blue-600" />
                       </button>
                       <div>
-                        <h3 className="text-xl font-bold text-blue-900 dark:text-white">{selectedAdminUser.displayName || 'مستخدم'}</h3>
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-xl font-bold text-blue-900 dark:text-white">{selectedAdminUser.displayName || 'مستخدم'}</h3>
+                          {selectedAdminUser.kycStatus === 'verified' && (
+                            <CheckCircle2 className="w-4 h-4 text-green-500" title="موثق" />
+                          )}
+                        </div>
                         <p className="text-xs text-gray-500">{selectedAdminUser.email}</p>
                       </div>
                     </div>
@@ -1615,7 +2239,12 @@ export default function App() {
                               {u.photoURL ? <img src={u.photoURL} className="w-full h-full object-cover" /> : <UserIcon className="w-5 h-5 text-blue-600" />}
                             </div>
                             <div>
-                              <p className="font-bold text-sm dark:text-white hover:text-blue-600 transition-colors">{u.displayName || 'بدون اسم'}</p>
+                              <div className="flex items-center gap-1">
+                                <p className="font-bold text-sm dark:text-white hover:text-blue-600 transition-colors">{u.displayName || 'بدون اسم'}</p>
+                                {u.kycStatus === 'verified' && (
+                                  <CheckCircle2 className="w-3 h-3 text-green-500" title="موثق" />
+                                )}
+                              </div>
                               <p className="text-[10px] text-gray-400">{u.email}</p>
                             </div>
                           </div>
@@ -1649,6 +2278,83 @@ export default function App() {
                   )}
                 </div>
               )}
+            </div>
+
+            {/* طلبات KYC */}
+            <div className="space-y-4">
+              <h3 className="font-bold text-blue-900 dark:text-white flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5" /> طلبات التحقق من الهوية (KYC)
+              </h3>
+              <div className="space-y-3">
+                {allUsers.filter(u => u.kycStatus === 'pending').length === 0 ? (
+                  <div className="bg-white dark:bg-gray-800 p-8 rounded-xl border border-dashed border-gray-200 dark:border-gray-700 text-center">
+                    <p className="text-gray-500 dark:text-gray-400 text-sm">لا توجد طلبات تحقق قيد الانتظار.</p>
+                  </div>
+                ) : (
+                  allUsers.filter(u => u.kycStatus === 'pending').map(u => (
+                    <div key={u.id} className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 space-y-3">
+                      <div className="flex justify-between items-start">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-full bg-yellow-100 dark:bg-yellow-900/30 flex items-center justify-center overflow-hidden">
+                            <ShieldCheck className="w-5 h-5 text-yellow-600" />
+                          </div>
+                          <div>
+                            <p className="font-bold text-sm dark:text-white">{u.displayName || 'بدون اسم'}</p>
+                            <p className="text-[10px] text-gray-400">{u.email}</p>
+                          </div>
+                        </div>
+                        <span className="px-2 py-1 bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400 text-[10px] font-bold rounded-full">
+                          قيد المراجعة
+                        </span>
+                      </div>
+                      
+                      <div className="bg-gray-50 dark:bg-gray-700/50 p-3 rounded-lg text-xs space-y-2">
+                        <div className="flex justify-between">
+                          <span className="text-gray-500 dark:text-gray-400">نوع المستند:</span>
+                          <span className="font-bold dark:text-white">
+                            {u.kycData?.documentType === 'passport' ? 'جواز سفر' : u.kycData?.documentType === 'driving_license' ? 'رخصة قيادة' : 'بطاقة هوية وطنية'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500 dark:text-gray-400">الاسم في المستند:</span>
+                          <span className="font-bold dark:text-white">{u.kycData?.fullName}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500 dark:text-gray-400">رقم المستند:</span>
+                          <span className="font-bold dark:text-white">{u.kycData?.documentNumber}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500 dark:text-gray-400">الجنسية:</span>
+                          <span className="font-bold dark:text-white">{u.kycData?.nationality}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500 dark:text-gray-400">تاريخ الميلاد:</span>
+                          <span className="font-bold dark:text-white">{u.kycData?.dob}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500 dark:text-gray-400">المستند:</span>
+                          <a href={u.kycData?.documentUrl} target="_blank" rel="noreferrer" className="text-blue-600 dark:text-blue-400 underline font-bold">عرض المستند</a>
+                        </div>
+                      </div>
+
+                      <div className="flex gap-2 pt-2 border-t border-gray-50 dark:border-gray-700">
+                        <button 
+                          onClick={() => handleApproveKyc(u.id)}
+                          className="flex-1 bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 py-2 rounded-lg text-xs font-bold hover:bg-green-100 transition-colors flex items-center justify-center gap-1"
+                        >
+                          <Check className="w-4 h-4" /> قبول
+                        </button>
+                        <button 
+                          onClick={() => handleRejectKyc(u.id)}
+                          className="flex-1 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 py-2 rounded-lg text-xs font-bold hover:bg-red-100 transition-colors flex items-center justify-center gap-1"
+                        >
+                          <X className="w-4 h-4" /> رفض
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
 
             {/* مراقبة المعاملات */}
@@ -1749,6 +2455,28 @@ export default function App() {
                 )}
               </div>
             </div>
+
+            {/* سجل الأحداث */}
+            <div className="space-y-4">
+              <h3 className="font-bold text-blue-900 dark:text-white flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5" /> سجل الأحداث
+              </h3>
+              <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 space-y-2 max-h-96 overflow-y-auto">
+                {logs.length === 0 ? (
+                  <p className="text-gray-500 dark:text-gray-400 text-sm text-center">لا توجد سجلات حالياً.</p>
+                ) : (
+                  logs.map(log => (
+                    <div key={log.id} className="text-xs border-b border-gray-100 dark:border-gray-700 py-2">
+                      <span className="text-gray-400">[{log.timestamp?.toDate ? new Intl.DateTimeFormat('ar-EG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(log.timestamp.toDate()) : '...'}]</span>
+                      <span className="font-bold text-blue-600 dark:text-blue-400 mx-2">{log.type}</span>
+                      <span className="dark:text-white">{log.message}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+            </div>
+            {adminView === 'logs' && <AdminLogsScreen />}
           </div>
         );
       default:

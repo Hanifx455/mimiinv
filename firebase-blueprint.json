@@ -14,6 +14,8 @@
         "binanceId": { "type": "string" },
         "balance": { "type": "number", "description": "Current balance including bonus" },
         "hasReceivedBonus": { "type": "boolean", "description": "Whether the user has received the $10 signup bonus" },
+        "referralCount": { "type": "number", "description": "Number of successful referrals" },
+        "referredBy": { "type": "string", "description": "UID of the user who referred this user" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "balance"]
@@ -71,6 +73,17 @@
         "timestamp": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "sector", "condition", "threshold", "active"]
+    },
+    "Referral": {
+      "title": "Referral",
+      "description": "Record of a successful referral",
+      "type": "object",
+      "properties": {
+        "referrerId": { "type": "string" },
+        "referredUserId": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["referrerId", "referredUserId"]
     }
   },
   "firestore": {
@@ -93,6 +106,10 @@
     "/alerts/{alertId}": {
       "schema": "Alert",
       "description": "User custom alerts"
+    },
+    "/referrals/{referralId}": {
+      "schema": "Referral",
+      "description": "Referral records"
     }
   }
 }

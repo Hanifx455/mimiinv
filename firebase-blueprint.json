@@ -1,0 +1,98 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and financial data",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "address": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "binanceId": { "type": "string" },
+        "balance": { "type": "number", "description": "Current balance including bonus" },
+        "hasReceivedBonus": { "type": "boolean", "description": "Whether the user has received the $10 signup bonus" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "balance"]
+    },
+    "Investment": {
+      "title": "Investment",
+      "description": "User investment record",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "sector": { "type": "string", "enum": ["عقارات", "صناعة", "أصول (ذهب/فضة)", "طاقة"] },
+        "amount": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "sector", "amount"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "User deposit or withdrawal record",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "type": { "type": "string", "enum": ["deposit", "withdrawal"] },
+        "amount": { "type": "number" },
+        "method": { "type": "string", "enum": ["bank", "binance"] },
+        "binanceId": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "type", "amount"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "In-app notification for user",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "read": { "type": "boolean" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "title", "message", "read"]
+    },
+    "Alert": {
+      "title": "Alert",
+      "description": "Custom performance alert for a sector",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "sector": { "type": "string" },
+        "condition": { "type": "string", "enum": ["above", "below"] },
+        "threshold": { "type": "number" },
+        "active": { "type": "boolean" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "sector", "condition", "threshold", "active"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile documents"
+    },
+    "/investments/{investmentId}": {
+      "schema": "Investment",
+      "description": "Investment records"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Transaction history records"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "User notifications"
+    },
+    "/alerts/{alertId}": {
+      "schema": "Alert",
+      "description": "User custom alerts"
+    }
+  }
+}

@@ -401,7 +401,7 @@ export default function App() {
     }
 
     try {
-      const profit = calculateProfit(investment.amount, investment.timestamp);
+      const profit = calculateProfit(investment.amount, investment.timestamp, investment.sector);
       const totalRefund = investment.amount + profit;
 
       // حذف الاستثمار
@@ -538,7 +538,7 @@ export default function App() {
     if (!user || !userData) return;
     
     // Calculate total profits
-    const totalProfits = investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp), 0);
+    const totalProfits = investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp, inv.sector), 0);
     
     if (totalProfits <= 0) {
       setStatus({ type: 'error', message: 'لا توجد أرباح متاحة للسحب حالياً' });
@@ -644,14 +644,20 @@ export default function App() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const calculateProfit = (amount: number, timestamp: any) => {
+  const calculateProfit = (amount: number, timestamp: any, sector?: string) => {
     if (!timestamp) return 0;
     const startTime = timestamp.seconds ? timestamp.seconds * 1000 : new Date(timestamp).getTime();
     const now = Date.now();
     const diffInMs = now - startTime;
     const diffInDays = diffInMs / (1000 * 60 * 60 * 24);
-    // الربح 0.5% يومياً
-    return amount * 0.005 * diffInDays;
+    
+    let rate = 0.05; // Default 5%
+    if (sector === 'صناعة') rate = 0.07;
+    else if (sector === 'أصول (ذهب/فضة)' || sector === 'أصول') rate = 0.09;
+    else if (sector === 'طاقة') rate = 0.10;
+    else if (sector === 'عقارات') rate = 0.05;
+
+    return amount * rate * diffInDays;
   };
 
   const AdminLogsScreen = () => {
@@ -916,7 +922,7 @@ export default function App() {
       id: 'عقارات',
       name: 'عقارات',
       description: 'الاستثمار في العقارات السكنية والتجارية في أرقى مناطق دبي.',
-      performance: '0.5% يومياً',
+      performance: '5% يومياً',
       risk: 'منخفض',
       returns: 'عائد يومي ثابت',
       icon: TrendingUp,
@@ -935,7 +941,7 @@ export default function App() {
       id: 'صناعة',
       name: 'صناعة',
       description: 'دعم القطاع الصناعي والتحويلي المتنامي في المناطق الحرة.',
-      performance: '0.7% يومياً',
+      performance: '7% يومياً',
       risk: 'متوسط',
       returns: 'عائد يومي ثابت',
       icon: TrendingUp,
@@ -954,7 +960,7 @@ export default function App() {
       id: 'أصول',
       name: 'أصول (ذهب/فضة)',
       description: 'حماية ثروتك من خلال الاستثمار في المعادن الثمينة والأصول الآمنة.',
-      performance: '0.9% يومياً',
+      performance: '9% يومياً',
       risk: 'منخفض جداً',
       returns: 'عائد يومي ثابت',
       icon: TrendingUp,
@@ -973,7 +979,7 @@ export default function App() {
       id: 'طاقة',
       name: 'طاقة',
       description: 'الاستثمار في مشاريع الطاقة المتجددة والنفط والغاز.',
-      performance: '1% يومياً',
+      performance: '10% يومياً',
       risk: 'متوسط',
       returns: 'عائد يومي ثابت',
       icon: TrendingUp,
@@ -992,8 +998,12 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center transition-colors duration-300">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex flex-col items-center justify-center transition-colors duration-300 gap-4">
+        <div className="relative w-16 h-16">
+          <div className="absolute inset-0 rounded-full border-4 border-blue-100 dark:border-blue-900/30"></div>
+          <div className="absolute inset-0 rounded-full border-4 border-blue-600 border-t-transparent animate-spin"></div>
+        </div>
+        <p className="text-blue-600 dark:text-blue-400 font-medium animate-pulse">جاري التحميل...</p>
       </div>
     );
   }
@@ -1029,6 +1039,41 @@ export default function App() {
       console.error('Error sending verification:', error);
       setStatus({ type: 'error', message: 'فشل إرسال رابط التحقق' });
     }
+  };
+
+  const exportToCSV = () => {
+    if (!investments.length && !transactions.length) {
+      setStatus({ type: 'error', message: 'لا توجد بيانات للتصدير' });
+      return;
+    }
+
+    let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; // Add BOM for Arabic support
+    
+    // Investments
+    csvContent += "الاستثمارات\n";
+    csvContent += "القطاع,المبلغ,التاريخ\n";
+    investments.forEach(inv => {
+      const date = inv.timestamp?.toDate ? inv.timestamp.toDate().toLocaleDateString('ar-EG') : '';
+      csvContent += `${inv.sector},${inv.amount},${date}\n`;
+    });
+
+    csvContent += "\nالمعاملات\n";
+    csvContent += "النوع,المبلغ,الحالة,التاريخ\n";
+    transactions.forEach(trans => {
+      const date = trans.timestamp?.toDate ? trans.timestamp.toDate().toLocaleDateString('ar-EG') : '';
+      const type = trans.type === 'deposit' ? 'إيداع' : 'سحب';
+      const status = trans.status === 'approved' ? 'مكتمل' : trans.status === 'pending' ? 'قيد الانتظار' : 'مرفوض';
+      csvContent += `${type},${trans.amount},${status},${date}\n`;
+    });
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "history.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setStatus({ type: 'success', message: 'تم تصدير البيانات بنجاح' });
   };
 
   const renderContent = () => {
@@ -1079,7 +1124,7 @@ export default function App() {
     switch (activeTab) {
       case 'dashboard':
         return (
-          <div className="space-y-6">
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="bg-gradient-to-r from-blue-800 to-blue-600 rounded-2xl p-6 text-white relative overflow-hidden shadow-lg">
               <div className="relative z-10">
                 <h2 className="text-2xl font-bold">مرحباً، {user.displayName}</h2>
@@ -1134,7 +1179,7 @@ export default function App() {
                 <DollarSign className="w-8 h-8 text-blue-500 mb-2" />
                 <span className="text-sm text-gray-500 dark:text-gray-400">إجمالي الأرباح</span>
                 <span className="font-bold dark:text-white">
-                  {investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp), 0).toFixed(2)}$
+                  {investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp, inv.sector), 0).toFixed(2)}$
                 </span>
               </div>
             </div>
@@ -1153,7 +1198,7 @@ export default function App() {
               ) : (
                 <div className="space-y-3">
                   {investments.map((inv) => {
-                    const profit = calculateProfit(inv.amount, inv.timestamp);
+                    const profit = calculateProfit(inv.amount, inv.timestamp, inv.sector);
                     return (
                       <div key={inv.id} className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 flex justify-between items-center animate-in fade-in slide-in-from-right-4 duration-300">
                         <div className="flex items-center gap-3">
@@ -1189,7 +1234,7 @@ export default function App() {
         );
       case 'investments':
         return (
-          <div className="space-y-4">
+          <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <h2 className="text-xl font-bold text-blue-900 dark:text-white">فرص الاستثمار</h2>
             
             {selectedSector ? (
@@ -1303,7 +1348,7 @@ export default function App() {
                   <div>
                     <p className="text-blue-100 text-sm mb-1 font-medium">إجمالي الأرباح المتراكمة</p>
                     <h3 className="text-3xl font-bold">
-                      ${investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp), 0).toFixed(2)}
+                      ${investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp, inv.sector), 0).toFixed(2)}
                     </h3>
                     <p className="text-xs text-blue-200 mt-2">من جميع استثماراتك النشطة</p>
                   </div>
@@ -1454,8 +1499,17 @@ export default function App() {
         );
 
         return (
-          <div className="space-y-4">
-            <h2 className="text-xl font-bold text-blue-900 dark:text-white">المحفظة</h2>
+          <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="flex justify-between items-center">
+              <h2 className="text-xl font-bold text-blue-900 dark:text-white">المحفظة</h2>
+              <button
+                onClick={exportToCSV}
+                className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-lg text-sm font-medium hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-all active:scale-95"
+              >
+                <Copy className="w-4 h-4" />
+                تصدير CSV
+              </button>
+            </div>
             
             {status && (
               <div className={`p-4 rounded-xl flex items-center gap-3 animate-in fade-in slide-in-from-top-2 duration-300 ${
@@ -1478,12 +1532,12 @@ export default function App() {
                 <div className="flex justify-between items-center mb-3">
                   <span className="text-sm text-gray-500 dark:text-gray-400">الأرباح المتراكمة</span>
                   <span className="font-bold text-green-600 dark:text-green-400">
-                    {investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp), 0).toFixed(4)} $
+                    {investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp, inv.sector), 0).toFixed(4)} $
                   </span>
                 </div>
                 <button
                   onClick={handleClaimProfits}
-                  className="w-full bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 py-3 rounded-xl font-bold hover:bg-green-100 transition-colors flex items-center justify-center gap-2"
+                  className="w-full bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 py-3 rounded-xl font-bold hover:bg-green-100 transition-all active:scale-95 flex items-center justify-center gap-2"
                 >
                   <TrendingUp className="w-5 h-5" />
                   إضافة الأرباح للمحفظة
@@ -1658,7 +1712,7 @@ export default function App() {
         );
       case 'certificates':
         return (
-          <div className="space-y-4">
+          <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <h2 className="text-xl font-bold text-blue-900 dark:text-white">الشهادات والتراخيص</h2>
             <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 text-center space-y-4 transition-colors">
               <div className="bg-yellow-50 dark:bg-yellow-900/20 w-20 h-20 rounded-full flex items-center justify-center mx-auto">
@@ -1676,7 +1730,7 @@ export default function App() {
         );
       case 'performance':
         return (
-          <div className="space-y-6">
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <h2 className="text-xl font-bold text-blue-900 dark:text-white">أداء المحفظة</h2>
             <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 transition-colors">
               <div className="mb-6">
@@ -1751,7 +1805,7 @@ export default function App() {
         ];
 
         return (
-          <div className="space-y-6">
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <h2 className="text-xl font-bold text-blue-900 dark:text-white">الملف الشخصي</h2>
             
             {status && activeTab === 'profile' && (
@@ -2035,7 +2089,7 @@ export default function App() {
       case 'admin':
         if (!isAdmin) return null;
         return (
-          <div className="space-y-6">
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="flex justify-between items-center">
               <h2 className="text-xl font-bold text-blue-900 dark:text-white flex items-center gap-2">
                 <ShieldCheck className="w-6 h-6 text-red-600" />
@@ -2192,7 +2246,7 @@ export default function App() {
                     <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-xl border border-green-100 dark:border-green-900/30">
                       <p className="text-[10px] text-green-600 dark:text-green-400 font-bold mb-1">الأرباح المحققة</p>
                       <p className="text-lg font-bold text-green-600">
-                        {allInvestments.filter(inv => inv.userId === selectedAdminUser.uid).reduce((acc, curr) => acc + calculateProfit(curr.amount, curr.timestamp), 0).toFixed(2)} $
+                        {allInvestments.filter(inv => inv.userId === selectedAdminUser.uid).reduce((acc, curr) => acc + calculateProfit(curr.amount, curr.timestamp, curr.sector), 0).toFixed(2)} $
                       </p>
                     </div>
                   </div>
@@ -2215,7 +2269,7 @@ export default function App() {
                               </div>
                             </div>
                             <div className="text-left">
-                              <p className="text-xs font-bold text-green-600">+{calculateProfit(inv.amount, inv.timestamp).toFixed(4)}$</p>
+                              <p className="text-xs font-bold text-green-600">+{calculateProfit(inv.amount, inv.timestamp, inv.sector).toFixed(4)}$</p>
                               <p className="text-[9px] text-gray-400">ربح متراكم</p>
                             </div>
                           </div>
@@ -2489,10 +2543,15 @@ export default function App() {
       {/* Header */}
       <header className="bg-white dark:bg-gray-800 shadow-sm p-4 flex justify-between items-center sticky top-0 z-50 transition-colors">
         <div className="flex items-center gap-2">
-          <div className="bg-blue-600 p-1.5 rounded-lg">
-            <TrendingUp className="w-5 h-5 text-white" />
+          <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-1.5 rounded-xl shadow-md">
+            <img 
+              src="https://api.dicebear.com/7.x/shapes/svg?seed=PipsInvestment&backgroundColor=transparent" 
+              alt="Pips Investment Logo" 
+              className="w-6 h-6"
+              referrerPolicy="no-referrer"
+            />
           </div>
-          <h1 className="text-lg font-bold text-blue-900 dark:text-white">منصة استثمار دبي</h1>
+          <h1 className="text-lg font-bold text-blue-900 dark:text-white">Pips Investment</h1>
         </div>
         <div className="flex items-center gap-3">
           <button

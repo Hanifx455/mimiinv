@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { LayoutDashboard, Wallet, TrendingUp, Award, DollarSign, LogIn, LogOut, User as UserIcon, Moon, Sun, LineChart as ChartIcon, ChevronRight, Copy, CheckCircle2, ShieldCheck, Users, ArrowUpRight, ArrowDownRight, Search, Check, X, Trash2, Bell, BellRing, Plus } from 'lucide-react';
-import { auth, db, storage, signInWithGoogle, logout } from './firebase';
+import { auth, db, storage, signInWithGoogle, logout, createUserWithEmailAndPassword, signInWithEmailAndPassword } from './firebase';
 import { onAuthStateChanged, User, sendEmailVerification } from 'firebase/auth';
 import { doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, serverTimestamp, deleteDoc, runTransaction } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
@@ -102,6 +102,11 @@ export default function App() {
   const [verificationSent, setVerificationSent] = useState(false);
   const [copied, setCopied] = useState(false);
   const [refreshTimer, setRefreshTimer] = useState(0);
+  
+  // Auth State
+  const [authMethod, setAuthMethod] = useState<'google' | 'email'>('google');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   
   // KYC State
   const [kycDocumentType, setKycDocumentType] = useState('national_id');
@@ -1017,13 +1022,39 @@ export default function App() {
           </div>
           <h1 className="text-2xl font-bold text-blue-900 dark:text-white">Pips Investment</h1>
           <p className="text-gray-600 dark:text-gray-400">سجل الدخول الآن وابدأ استثمارك مع بونص 10$ مجاناً عند التسجيل.</p>
-          <button
-            onClick={signInWithGoogle}
-            className="w-full flex items-center justify-center gap-3 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 py-3 rounded-xl font-semibold text-gray-700 dark:text-white hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors"
-          >
-            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-6 h-6" />
-            تسجيل الدخول باستخدام جوجل
-          </button>
+          
+          <div className="flex gap-2 mb-6">
+            <button onClick={() => setAuthMethod('google')} className={`flex-1 py-2 text-sm rounded-lg ${authMethod === 'google' ? 'bg-blue-600 text-white' : 'bg-gray-100 dark:bg-gray-700'}`}>جوجل</button>
+            <button onClick={() => setAuthMethod('email')} className={`flex-1 py-2 text-sm rounded-lg ${authMethod === 'email' ? 'bg-blue-600 text-white' : 'bg-gray-100 dark:bg-gray-700'}`}>بريد</button>
+          </div>
+
+          {authMethod === 'google' && (
+            <button
+              onClick={signInWithGoogle}
+              className="w-full flex items-center justify-center gap-3 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 py-3 rounded-xl font-semibold text-gray-700 dark:text-white hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors"
+            >
+              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-6 h-6" />
+              تسجيل الدخول باستخدام جوجل
+            </button>
+          )}
+
+          {authMethod === 'email' && (
+            <div className="space-y-4">
+              <input type="email" placeholder="البريد الإلكتروني" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full p-3 border rounded-lg" />
+              <input type="password" placeholder="كلمة المرور" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full p-3 border rounded-lg" />
+              <button onClick={async () => {
+                try {
+                  await createUserWithEmailAndPassword(auth, email, password).catch(e => signInWithEmailAndPassword(auth, email, password));
+                } catch (error: any) {
+                  if (error.code === 'auth/operation-not-allowed') {
+                    alert('خطأ: طريقة تسجيل الدخول هذه غير مفعلة في إعدادات Firebase. يرجى تفعيلها من لوحة تحكم Firebase.');
+                  } else {
+                    alert('حدث خطأ: ' + error.message);
+                  }
+                }
+              }} className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold">تسجيل / دخول</button>
+            </div>
+          )}
         </div>
       </div>
     );

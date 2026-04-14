@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { LayoutDashboard, Wallet, TrendingUp, Award, DollarSign, LogIn, LogOut, User as UserIcon, Moon, Sun, LineChart as ChartIcon, ChevronRight, Copy, CheckCircle2, ShieldCheck, Users, ArrowUpRight, ArrowDownRight, Search, Check, X, Trash2, Bell, BellRing, Plus } from 'lucide-react';
+import { LayoutDashboard, Wallet, TrendingUp, Award, DollarSign, LogIn, LogOut, User as UserIcon, Moon, Sun, LineChart as ChartIcon, ChevronRight, Copy, CheckCircle2, ShieldCheck, Users, ArrowUpRight, ArrowDownRight, Search, Check, X, Trash2, Bell, BellRing, Plus, HelpCircle } from 'lucide-react';
 import { auth, db, storage, signInWithGoogle, logout, createUserWithEmailAndPassword, signInWithEmailAndPassword } from './firebase';
 import { onAuthStateChanged, User, sendEmailVerification } from 'firebase/auth';
 import { doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, serverTimestamp, deleteDoc, runTransaction } from 'firebase/firestore';
@@ -1826,6 +1826,64 @@ export default function App() {
             </div>
           </div>
         );
+      case 'support':
+        return (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <h2 className="text-xl font-bold text-blue-900 dark:text-white">فتح تذكرة دعم</h2>
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 transition-colors">
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  const formData = new FormData(e.currentTarget);
+                  const subject = formData.get('subject') as string;
+                  const message = formData.get('message') as string;
+                  
+                  try {
+                    await addDoc(collection(db, 'tickets'), {
+                      userId: user?.uid,
+                      userEmail: user?.email,
+                      subject,
+                      message,
+                      status: 'open',
+                      createdAt: serverTimestamp()
+                    });
+                    
+                    // Send email notification
+                    await emailjs.send(
+                      import.meta.env.VITE_EMAILJS_SERVICE_ID,
+                      import.meta.env.VITE_EMAILJS_TEMPLATE_ID,
+                      {
+                        to_email: 'invstmimi@gmail.com',
+                        from_name: user?.displayName || 'مستثمر',
+                        subject: subject,
+                        message: message,
+                        reply_to: user?.email,
+                      },
+                      import.meta.env.VITE_EMAILJS_PUBLIC_KEY
+                    );
+
+                    setStatus({ type: 'success', message: 'تم إرسال التذكرة بنجاح' });
+                    (e.target as HTMLFormElement).reset();
+                  } catch (error) {
+                    console.error('Error creating ticket:', error);
+                    setStatus({ type: 'error', message: 'حدث خطأ أثناء إرسال التذكرة' });
+                  }
+                }}
+                className="space-y-4"
+              >
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">الموضوع</label>
+                  <input name="subject" required className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 dark:text-white" />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">الرسالة</label>
+                  <textarea name="message" required rows={4} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 dark:text-white" />
+                </div>
+                <button type="submit" className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors">إرسال التذكرة</button>
+              </form>
+            </div>
+          </div>
+        );
       case 'profile':
         const avatars = [
           'https://api.dicebear.com/7.x/avataaars/svg?seed=Felix',
@@ -1887,6 +1945,22 @@ export default function App() {
                 <div className="text-center">
                   <p className="font-bold text-blue-900 dark:text-white">{userData?.displayName || 'مستثمر جديد'}</p>
                   <p className="text-xs text-gray-500 dark:text-gray-400">{user.email}</p>
+                  {!user.emailVerified && (
+                    <button
+                      onClick={async () => {
+                        try {
+                          await sendEmailVerification(user);
+                          setStatus({ type: 'success', message: 'تم إرسال رابط التحقق بنجاح' });
+                        } catch (error) {
+                          console.error('Error sending verification email:', error);
+                          setStatus({ type: 'error', message: 'حدث خطأ أثناء إرسال الرابط' });
+                        }
+                      }}
+                      className="mt-2 text-xs text-blue-600 hover:underline"
+                    >
+                      إعادة إرسال رابط التحقق
+                    </button>
+                  )}
                 </div>
 
                 <div className="w-full space-y-3">
@@ -2622,6 +2696,7 @@ export default function App() {
           { id: 'investments', icon: TrendingUp, label: 'الاستثمارات' },
           { id: 'performance', icon: ChartIcon, label: 'الأداء' },
           { id: 'wallet', icon: Wallet, label: 'المحفظة' },
+          { id: 'support', icon: HelpCircle, label: 'الدعم' },
           { id: 'profile', icon: UserIcon, label: 'حسابي' },
           isAdmin && { id: 'admin', icon: ShieldCheck, label: 'الإدارة' },
         ].filter(Boolean).map((tab: any) => (

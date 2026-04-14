@@ -4,12 +4,12 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { LayoutDashboard, Wallet, TrendingUp, Award, DollarSign, LogIn, LogOut, User as UserIcon, Moon, Sun, LineChart as ChartIcon, ChevronRight, Copy, CheckCircle2, ShieldCheck, Users, ArrowUpRight, ArrowDownRight, Search, Check, X, Trash2, Bell, BellRing, Plus, HelpCircle } from 'lucide-react';
+import { LayoutDashboard, Wallet, TrendingUp, Award, DollarSign, LogIn, LogOut, User as UserIcon, Moon, Sun, LineChart as ChartIcon, ChevronRight, Copy, CheckCircle2, ShieldCheck, Users, ArrowUpRight, ArrowDownRight, Search, Check, X, Trash2, Bell, BellRing, Plus, HelpCircle, Share2, FileText } from 'lucide-react';
 import { auth, db, storage, signInWithGoogle, logout, createUserWithEmailAndPassword, signInWithEmailAndPassword } from './firebase';
 import { onAuthStateChanged, User, sendEmailVerification } from 'firebase/auth';
-import { doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, serverTimestamp, deleteDoc, runTransaction } from 'firebase/firestore';
+import { doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, serverTimestamp, deleteDoc, runTransaction, updateDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, PieChart, Pie, Cell, Legend } from 'recharts';
 import emailjs from '@emailjs/browser';
 
 enum OperationType {
@@ -281,11 +281,10 @@ export default function App() {
                     if (referrerSnap.exists()) {
                       const referrerData = referrerSnap.data();
                       const newReferralCount = (referrerData.referralCount || 0) + 1;
-                      transaction.update(referrerRef, { referralCount: newReferralCount });
-                      
-                      if (newReferralCount === 50) {
-                        transaction.update(referrerRef, { balance: (referrerData.balance || 0) + 10 });
-                      }
+                      transaction.update(referrerRef, { 
+                        referralCount: newReferralCount,
+                        balance: (referrerData.balance || 0) + 0.5 
+                      });
                       
                       const referralRef = doc(collection(db, 'referrals'));
                       transaction.set(referralRef, {
@@ -426,14 +425,15 @@ export default function App() {
 
   const handleInvest = async (sector: string, amount: number) => {
     if (!user || !userData) return;
-    if (sector !== 'العقار' && amount < 100) {
-      setStatus({ type: 'error', message: `الحد الأدنى للاستثمار في ${sector} هو 100$، لقد حاولت استثمار ${amount}$` });
+    
+    // التحقق من الحد الأدنى بناءً على القطاع
+    const minInvestment = sector === 'عقارات' ? 10 : 100;
+    
+    if (amount < minInvestment) {
+      setStatus({ type: 'error', message: `الحد الأدنى للاستثمار في ${sector} هو ${minInvestment}$، لقد حاولت استثمار ${amount}$` });
       return;
     }
-    if (sector === 'العقار' && amount < 10) {
-      setStatus({ type: 'error', message: `الحد الأدنى للاستثمار في ${sector} هو 10$، لقد حاولت استثمار ${amount}$` });
-      return;
-    }
+    
     if (userData.balance < amount) {
       setStatus({ type: 'error', message: `الرصيد غير كافٍ (المطلوب ${amount}$)` });
       return;
@@ -689,7 +689,7 @@ export default function App() {
             <tbody>
               {paginatedLogs.map(log => (
                 <tr key={log.id} className="border-b border-gray-100 dark:border-gray-700">
-                  <td className="py-2 text-gray-400">{log.timestamp?.toDate ? new Intl.DateTimeFormat('ar-EG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(log.timestamp.toDate()) : '...'}</td>
+                  <td className="py-2 text-gray-400">{log.timestamp?.toDate ? new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(log.timestamp.toDate()) : '...'}</td>
                   <td className="py-2 font-bold text-blue-600 dark:text-blue-400">{log.type}</td>
                   <td className="py-2 dark:text-white">{log.message}</td>
                 </tr>
@@ -1084,14 +1084,14 @@ export default function App() {
     csvContent += "الاستثمارات\n";
     csvContent += "القطاع,المبلغ,التاريخ\n";
     investments.forEach(inv => {
-      const date = inv.timestamp?.toDate ? inv.timestamp.toDate().toLocaleDateString('ar-EG') : '';
+      const date = inv.timestamp?.toDate ? inv.timestamp.toDate().toLocaleDateString('fr-FR') : '';
       csvContent += `${inv.sector},${inv.amount},${date}\n`;
     });
 
     csvContent += "\nالمعاملات\n";
     csvContent += "النوع,المبلغ,الحالة,التاريخ\n";
     transactions.forEach(trans => {
-      const date = trans.timestamp?.toDate ? trans.timestamp.toDate().toLocaleDateString('ar-EG') : '';
+      const date = trans.timestamp?.toDate ? trans.timestamp.toDate().toLocaleDateString('fr-FR') : '';
       const type = trans.type === 'deposit' ? 'إيداع' : 'سحب';
       const status = trans.status === 'approved' ? 'مكتمل' : trans.status === 'pending' ? 'قيد الانتظار' : 'مرفوض';
       csvContent += `${type},${trans.amount},${status},${date}\n`;
@@ -1524,10 +1524,46 @@ export default function App() {
             )}
           </div>
         );
+      case 'certificates':
+        return (
+          <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <h2 className="text-xl font-bold text-blue-900 dark:text-white">شهادات الاستثمار</h2>
+            {investments.length === 0 ? (
+              <p className="text-gray-500 dark:text-gray-400">لا توجد استثمارات حالياً للحصول على شهادات.</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {investments.map((inv) => (
+                  <div key={inv.id} className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 transition-colors">
+                    <div className="flex items-center gap-4 mb-4">
+                      <div className="p-3 bg-blue-100 dark:bg-blue-900/30 rounded-full">
+                        <Award className="w-6 h-6 text-blue-600 dark:text-blue-400" />
+                      </div>
+                      <div>
+                        <h3 className="font-bold text-lg dark:text-white">{inv.sector}</h3>
+                        <p className="text-sm text-gray-500 dark:text-gray-400">مبلغ الاستثمار: {inv.amount}$</p>
+                      </div>
+                    </div>
+                    <button className="w-full bg-blue-600 text-white py-2 rounded-lg font-bold hover:bg-blue-700 transition-colors">
+                      تحميل الشهادة
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
       case 'wallet':
         const filteredTransactions = transactions.filter(t => 
           transactionFilter === 'all' ? true : t.type === transactionFilter
         );
+
+        const investmentBreakdown = investments.reduce((acc, inv) => {
+          acc[inv.sector] = (acc[inv.sector] || 0) + inv.amount;
+          return acc;
+        }, {} as Record<string, number>);
+
+        const pieData = Object.entries(investmentBreakdown).map(([name, value]) => ({ name, value }));
+        const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042'];
 
         return (
           <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -1553,31 +1589,61 @@ export default function App() {
               </div>
             )}
 
-            <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 text-center space-y-4 transition-colors relative overflow-hidden">
-              <div className="space-y-2">
-                <p className="text-gray-500 dark:text-gray-400 font-medium">الرصيد المتاح</p>
-                <p className="text-4xl font-bold text-blue-900 dark:text-blue-400">{userData?.balance.toFixed(2)} $</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 text-center space-y-4 transition-colors relative overflow-hidden">
+                <div className="space-y-2">
+                  <p className="text-gray-500 dark:text-gray-400 font-medium">الرصيد المتاح</p>
+                  <p className="text-4xl font-bold text-blue-900 dark:text-blue-400">{userData?.balance.toFixed(2)} $</p>
+                </div>
+                
+                <div className="pt-4 border-t border-gray-100 dark:border-gray-700">
+                  <div className="flex justify-between items-center mb-3">
+                    <span className="text-sm text-gray-500 dark:text-gray-400">الأرباح المتراكمة</span>
+                    <span className="font-bold text-green-600 dark:text-green-400">
+                      {investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp, inv.sector), 0).toFixed(4)} $
+                    </span>
+                  </div>
+                  <button
+                    onClick={handleClaimProfits}
+                    className="w-full bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 py-3 rounded-xl font-bold hover:bg-green-100 transition-all active:scale-95 flex items-center justify-center gap-2"
+                  >
+                    <TrendingUp className="w-5 h-5" />
+                    إضافة الأرباح للمحفظة
+                  </button>
+                </div>
+
+                <div className="absolute -bottom-4 -right-4 opacity-5 pointer-events-none">
+                  <Wallet className="w-24 h-24 text-blue-900" />
+                </div>
               </div>
               
-              <div className="pt-4 border-t border-gray-100 dark:border-gray-700">
-                <div className="flex justify-between items-center mb-3">
-                  <span className="text-sm text-gray-500 dark:text-gray-400">الأرباح المتراكمة</span>
-                  <span className="font-bold text-green-600 dark:text-green-400">
-                    {investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp, inv.sector), 0).toFixed(4)} $
-                  </span>
+              {pieData.length > 0 && (
+                <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 transition-colors">
+                  <h3 className="text-lg font-bold text-blue-900 dark:text-white mb-4">توزيع الاستثمارات</h3>
+                  <div className="h-64">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={pieData}
+                          dataKey="value"
+                          nameKey="name"
+                          cx="50%"
+                          cy="50%"
+                          outerRadius={80}
+                          fill="#8884d8"
+                          label
+                        >
+                          {pieData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip />
+                        <Legend />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
                 </div>
-                <button
-                  onClick={handleClaimProfits}
-                  className="w-full bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 py-3 rounded-xl font-bold hover:bg-green-100 transition-all active:scale-95 flex items-center justify-center gap-2"
-                >
-                  <TrendingUp className="w-5 h-5" />
-                  إضافة الأرباح للمحفظة
-                </button>
-              </div>
-
-              <div className="absolute -bottom-4 -right-4 opacity-5 pointer-events-none">
-                <Wallet className="w-24 h-24 text-blue-900" />
-              </div>
+              )}
             </div>
             
             <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 space-y-4 transition-colors">
@@ -1712,7 +1778,7 @@ export default function App() {
                           </p>
                           <p className="text-[10px] text-gray-400">
                             {trans.timestamp?.toDate ? (
-                              new Intl.DateTimeFormat('ar-EG', {
+                              new Intl.DateTimeFormat('fr-FR', {
                                 day: 'numeric',
                                 month: 'long',
                                 year: 'numeric',
@@ -1959,6 +2025,61 @@ export default function App() {
                       className="mt-2 text-xs text-blue-600 hover:underline"
                     >
                       إعادة إرسال رابط التحقق
+                    </button>
+                  )}
+                </div>
+
+                <div className="w-full bg-gray-50 dark:bg-gray-700 p-4 rounded-xl space-y-3">
+                  <p className="text-xs font-bold text-gray-500 dark:text-gray-400 text-center">كود الدعوة الخاص بك</p>
+                  
+                  <div className="bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg border border-blue-100 dark:border-blue-800">
+                    <p className="text-xs text-blue-800 dark:text-blue-300 text-center leading-relaxed">
+                      شارك كود الدعوة الخاص بك مع أصدقائك! احصل على مكافآت عند تسجيلهم واستثمارهم في Pips Investment.
+                    </p>
+                  </div>
+
+                  {userData?.referralCode ? (
+                    <div className="flex items-center justify-center gap-2">
+                      <span className="font-mono text-lg font-bold text-blue-600 dark:text-blue-400">{userData.referralCode}</span>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(`${window.location.origin}/?ref=${userData.referralCode}`);
+                          setStatus({ type: 'success', message: 'تم نسخ رابط الدعوة' });
+                        }}
+                        className="p-2 text-gray-500 hover:text-blue-600 transition-colors"
+                      >
+                        <Copy className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (navigator.share) {
+                            navigator.share({
+                              title: 'انضم إلينا في Pips Investment',
+                              text: `استخدم كودي ${userData.referralCode} للانضمام وابدأ رحلتك الاستثمارية!`,
+                              url: `${window.location.origin}/?ref=${userData.referralCode}`
+                            });
+                          }
+                        }}
+                        className="p-2 text-gray-500 hover:text-blue-600 transition-colors"
+                      >
+                        <Share2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={async () => {
+                        try {
+                          const newCode = user.uid.substring(0, 6).toUpperCase();
+                          await updateDoc(doc(db, 'users', user.uid), { referralCode: newCode });
+                          setStatus({ type: 'success', message: 'تم إنشاء كود الدعوة' });
+                        } catch (error) {
+                          console.error('Error generating referral code:', error);
+                          setStatus({ type: 'error', message: 'حدث خطأ أثناء إنشاء الكود' });
+                        }
+                      }}
+                      className="w-full py-2 bg-blue-600 text-white rounded-lg font-bold text-sm hover:bg-blue-700 transition-colors"
+                    >
+                      إنشاء كود دعوة
                     </button>
                   )}
                 </div>
@@ -2561,7 +2682,7 @@ export default function App() {
                               {t.type === 'deposit' ? '+' : '-'}{t.amount.toFixed(2)} $
                             </p>
                             <p className="text-[10px] text-gray-400">
-                              {t.timestamp?.toDate ? new Intl.DateTimeFormat('ar-EG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(t.timestamp.toDate()) : '...'}
+                              {t.timestamp?.toDate ? new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(t.timestamp.toDate()) : '...'}
                             </p>
                           </div>
                         </div>
@@ -2626,7 +2747,7 @@ export default function App() {
                 ) : (
                   logs.map(log => (
                     <div key={log.id} className="text-xs border-b border-gray-100 dark:border-gray-700 py-2">
-                      <span className="text-gray-400">[{log.timestamp?.toDate ? new Intl.DateTimeFormat('ar-EG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(log.timestamp.toDate()) : '...'}]</span>
+                      <span className="text-gray-400">[{log.timestamp?.toDate ? new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(log.timestamp.toDate()) : '...'}]</span>
                       <span className="font-bold text-blue-600 dark:text-blue-400 mx-2">{log.type}</span>
                       <span className="dark:text-white">{log.message}</span>
                     </div>
@@ -2696,6 +2817,7 @@ export default function App() {
           { id: 'investments', icon: TrendingUp, label: 'الاستثمارات' },
           { id: 'performance', icon: ChartIcon, label: 'الأداء' },
           { id: 'wallet', icon: Wallet, label: 'المحفظة' },
+          { id: 'certificates', icon: FileText, label: 'شهاداتي' },
           { id: 'support', icon: HelpCircle, label: 'الدعم' },
           { id: 'profile', icon: UserIcon, label: 'حسابي' },
           isAdmin && { id: 'admin', icon: ShieldCheck, label: 'الإدارة' },
@@ -2776,7 +2898,7 @@ export default function App() {
                     <div className="flex justify-between items-start mb-1">
                       <h4 className={`font-bold text-sm ${n.read ? 'text-gray-600 dark:text-gray-400' : 'text-blue-900 dark:text-blue-400'}`}>{n.title}</h4>
                       <span className="text-[8px] text-gray-400">
-                        {n.timestamp?.toDate ? new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit' }).format(n.timestamp.toDate()) : '...'}
+                        {n.timestamp?.toDate ? new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' }).format(n.timestamp.toDate()) : '...'}
                       </span>
                     </div>
                     <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">{n.message}</p>

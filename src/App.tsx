@@ -7,7 +7,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { LayoutDashboard, Wallet, TrendingUp, Award, DollarSign, LogIn, LogOut, User as UserIcon, Moon, Sun, LineChart as ChartIcon, ChevronRight, Copy, CheckCircle2, ShieldCheck, Users, ArrowUpRight, ArrowDownRight, Search, Check, X, Trash2, Bell, BellRing, Plus, HelpCircle, Share2, FileText } from 'lucide-react';
 import { auth, db, storage, signInWithGoogle, logout, createUserWithEmailAndPassword, signInWithEmailAndPassword } from './firebase';
 import { onAuthStateChanged, User, sendEmailVerification } from 'firebase/auth';
-import { doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, serverTimestamp, deleteDoc, runTransaction, updateDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, serverTimestamp, deleteDoc, runTransaction, updateDoc, getDocs, writeBatch } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, PieChart, Pie, Cell, Legend } from 'recharts';
 import emailjs from '@emailjs/browser';
@@ -86,6 +86,7 @@ export default function App() {
   const [editAddress, setEditAddress] = useState('');
   const [editPhotoURL, setEditPhotoURL] = useState('');
   const [editBinanceId, setEditBinanceId] = useState('');
+  const [dailyTasks, setDailyTasks] = useState<any[]>([]);
   const [paymentMethod, setPaymentMethod] = useState<'bank' | 'binance'>('binance');
   const [binanceId, setBinanceId] = useState('');
   const [status, setStatus] = useState<{ type: 'success' | 'error', message: string } | null>(null);
@@ -98,6 +99,9 @@ export default function App() {
   const [alertSector, setAlertSector] = useState('عقارات');
   const [alertCondition, setAlertCondition] = useState<'above' | 'below'>('above');
   const [alertThreshold, setAlertThreshold] = useState('');
+  const [globalNotifTitle, setGlobalNotifTitle] = useState('');
+  const [globalNotifMessage, setGlobalNotifMessage] = useState('');
+  const [globalNotifType, setGlobalNotifType] = useState('marketNews');
   const [showNotifications, setShowNotifications] = useState(false);
   const [verificationSent, setVerificationSent] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -268,6 +272,12 @@ export default function App() {
                 hasReceivedBonus: true,
                 kycStatus: 'unverified',
                 referralCount: 0,
+                notificationSettings: {
+                  confirmations: true,
+                  priceChanges: true,
+                  dividends: true,
+                  marketNews: true
+                },
                 createdAt: new Date().toISOString()
               };
 
@@ -285,6 +295,19 @@ export default function App() {
                         referralCount: newReferralCount,
                         balance: (referrerData.balance || 0) + 0.5 
                       });
+                      
+                      // إرسال تنبيه للمحيل (إذا كان مفعلاً)
+                      if (referrerData.notificationSettings?.dividends !== false) {
+                        const notifRef = doc(collection(db, 'notifications'));
+                        transaction.set(notifRef, {
+                          userId: referredBy,
+                          title: 'مكافأة دعوة جديدة',
+                          message: `لقد حصلت على مكافأة قدرها 0.5$ لانضمام مستخدم جديد عن طريقك.`,
+                          type: 'dividends',
+                          read: false,
+                          timestamp: serverTimestamp()
+                        });
+                      }
                       
                       const referralRef = doc(collection(db, 'referrals'));
                       transaction.set(referralRef, {
@@ -371,7 +394,54 @@ export default function App() {
 
         initializeUserData();
 
+        // نظام التذكير بالمهام اليومية
+        const checkDailyTasksReminder = async () => {
+          if (!currentUser) return;
+          
+          const now = new Date();
+          const today = now.toISOString().split('T')[0];
+          
+          // التحقق مما إذا كان الوقت قد تجاوز منتصف النهار (12:00)
+          if (now.getHours() >= 12) {
+            const userRef = doc(db, 'users', currentUser.uid);
+            const userSnap = await getDoc(userRef);
+            
+            if (userSnap.exists()) {
+              const userData = userSnap.data();
+              const dailyTasks = userData.dailyTasks || {};
+              
+              // إذا لم يتم إكمال جميع المهام اليوم
+              const completedCount = dailyTasks.lastDate === today ? (dailyTasks.completed?.length || 0) : 0;
+              
+              if (completedCount < 3) { // 3 هو عدد المهام الكلي
+                // التحقق مما إذا تم إرسال تذكير اليوم بالفعل لتجنب التكرار
+                const lastReminderDate = userData.lastTaskReminderDate;
+                
+                if (lastReminderDate !== today) {
+                  // إرسال التنبيه
+                  await addDoc(collection(db, 'notifications'), {
+                    userId: currentUser.uid,
+                    title: 'تذكير بالمهام اليومية ⏰',
+                    message: 'لم تقم بإكمال مهامك اليومية بعد. أكملها الآن لتتمكن من سحب أرباحك!',
+                    type: 'marketNews',
+                    read: false,
+                    timestamp: serverTimestamp()
+                  });
+                  
+                  // تحديث تاريخ آخر تذكير
+                  await updateDoc(userRef, { lastTaskReminderDate: today });
+                }
+              }
+            }
+          }
+        };
+
+        // تشغيل التحقق عند التحميل وكل ساعة
+        checkDailyTasksReminder();
+        const reminderInterval = setInterval(checkDailyTasksReminder, 3600000);
+
         unsubListeners = () => {
+          clearInterval(reminderInterval);
           unsubUser();
           unsubInvestments();
           unsubTransactions();
@@ -392,14 +462,14 @@ export default function App() {
     };
   }, []);
 
-  const handleCancelInvestment = async (investment: any) => {
+  const handleCancelInvestment = async (investment: any, isAdminAction: boolean = false) => {
     if (!user || !userData) return;
     
     const investmentDate = investment.timestamp?.toDate ? investment.timestamp.toDate() : new Date(investment.timestamp);
     const now = new Date();
     const diffInDays = (now.getTime() - investmentDate.getTime()) / (1000 * 60 * 60 * 24);
 
-    if (diffInDays < 30) {
+    if (!isAdminAction && diffInDays < 30) {
       setStatus({ type: 'error', message: 'لا يمكن إلغاء الاستثمار إلا بعد مرور 30 يوماً' });
       return;
     }
@@ -412,10 +482,32 @@ export default function App() {
       await deleteDoc(doc(db, 'investments', investment.id));
 
       // إعادة المبلغ والأرباح للمحفظة
-      const userRef = doc(db, 'users', user.uid);
-      await setDoc(userRef, { balance: userData.balance + totalRefund }, { merge: true });
+      const targetUserId = investment.userId || user.uid;
+      const userRef = doc(db, 'users', targetUserId);
+      const userSnap = await getDoc(userRef);
+      
+      if (userSnap.exists()) {
+        const targetUserData = userSnap.data();
+        await setDoc(userRef, { balance: (targetUserData.balance || 0) + totalRefund }, { merge: true });
+      }
 
-      await logEvent(user.uid, 'استثمار', `تم إلغاء الاستثمار في ${investment.sector} واسترداد ${totalRefund.toFixed(2)}$`);
+      const logMsg = isAdminAction 
+        ? `قام المدير بإلغاء استثمار المستخدم ${targetUserId} في ${investment.sector} واسترداد ${totalRefund.toFixed(2)}$`
+        : `تم إلغاء الاستثمار في ${investment.sector} واسترداد ${totalRefund.toFixed(2)}$`;
+        
+      await logEvent(user.uid, 'استثمار', logMsg);
+      
+      if (isAdminAction) {
+        await addDoc(collection(db, 'notifications'), {
+          userId: targetUserId,
+          title: 'تم إلغاء استثمارك بواسطة الإدارة',
+          message: `قامت الإدارة بإلغاء استثمارك في قطاع ${investment.sector}. تم إرجاع مبلغ الاستثمار مع الأرباح (${totalRefund.toFixed(2)}$) إلى محفظتك.`,
+          type: 'confirmations',
+          read: false,
+          timestamp: serverTimestamp()
+        });
+      }
+
       setStatus({ type: 'success', message: `تم إلغاء الاستثمار بنجاح واسترداد ${totalRefund.toFixed(2)}$` });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'investments');
@@ -542,6 +634,15 @@ export default function App() {
   const handleClaimProfits = async () => {
     if (!user || !userData) return;
     
+    // Check daily tasks
+    const today = new Date().toISOString().split('T')[0];
+    const completedTasks = userData.dailyTasks?.lastDate === today ? (userData.dailyTasks?.completed || []) : [];
+    
+    if (completedTasks.length < DAILY_TASKS_LIST.length) {
+      setStatus({ type: 'error', message: 'يجب إكمال جميع المهام اليومية أولاً لتتمكن من استلام الأرباح.' });
+      return;
+    }
+
     // Calculate total profits
     const totalProfits = investments.reduce((acc, inv) => acc + calculateProfit(inv.amount, inv.timestamp, inv.sector), 0);
     
@@ -562,6 +663,18 @@ export default function App() {
       }
 
       setStatus({ type: 'success', message: `تم إضافة ${totalProfits.toFixed(2)}$ إلى محفظتك بنجاح` });
+
+      // إرسال تنبيه بالأرباح (إذا كان مفعلاً)
+      if (userData.notificationSettings?.dividends !== false) {
+        await addDoc(collection(db, 'notifications'), {
+          userId: user.uid,
+          title: 'توزيع أرباح',
+          message: `تمت إضافة أرباح استثماراتك بمبلغ ${totalProfits.toFixed(2)}$ إلى محفظتك.`,
+          type: 'dividends',
+          read: false,
+          timestamp: serverTimestamp()
+        });
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'investments');
       setStatus({ type: 'error', message: 'حدث خطأ أثناء تحويل الأرباح' });
@@ -752,14 +865,16 @@ export default function App() {
       const title = transaction.type === 'deposit' ? 'تم تأكيد الإيداع' : 'تم تأكيد السحب';
       const message = `لقد تمت الموافقة على عملية ${transaction.type === 'deposit' ? 'إيداع' : 'سحب'} مبلغ ${transaction.amount}$ بنجاح. رصيدك الجديد هو ${newBalance.toFixed(2)}$`;
 
-      // إرسال تنبيه للمستخدم
-      await addDoc(collection(db, 'notifications'), {
-        userId: transaction.userId,
-        title,
-        message,
-        read: false,
-        timestamp: serverTimestamp()
-      });
+      // إرسال تنبيه للمستخدم (إذا كان مفعلاً)
+      if (userData.notificationSettings?.confirmations !== false) {
+        await addDoc(collection(db, 'notifications'), {
+          userId: transaction.userId,
+          title,
+          message,
+          read: false,
+          timestamp: serverTimestamp()
+        });
+      }
 
       // إرسال بريد إلكتروني (EmailJS)
       if (import.meta.env.VITE_EMAILJS_SERVICE_ID && userData.email) {
@@ -795,11 +910,11 @@ export default function App() {
 
       // Refund balance if it was a withdrawal
       if (transaction.type === 'withdrawal') {
-        const userRef = doc(db, 'users', transaction.userId);
-        const userSnap = await getDoc(userRef);
-        if (userSnap.exists()) {
-          const userData = userSnap.data();
-          await setDoc(userRef, { balance: (userData.balance || 0) + transaction.amount }, { merge: true });
+        const userRef_refund = doc(db, 'users', transaction.userId);
+        const userSnap_refund = await getDoc(userRef_refund);
+        if (userSnap_refund.exists()) {
+          const userData_refund = userSnap_refund.data();
+          await setDoc(userRef_refund, { balance: (userData_refund.balance || 0) + transaction.amount }, { merge: true });
         }
       }
 
@@ -812,28 +927,34 @@ export default function App() {
       const title = transaction.type === 'deposit' ? 'تم رفض الإيداع' : 'تم رفض السحب';
       const message = `نأسف، لقد تم رفض عملية ${transaction.type === 'deposit' ? 'إيداع' : 'سحب'} مبلغ ${transaction.amount}$. يرجى التواصل مع الدعم الفني للمزيد من التفاصيل.`;
 
-      // إرسال تنبيه بالرفض
-      await addDoc(collection(db, 'notifications'), {
-        userId: transaction.userId,
-        title,
-        message,
-        read: false,
-        timestamp: serverTimestamp()
-      });
+      // إرسال تنبيه بالرفض (إذا كان مفعلاً)
+      const userRef_notif = doc(db, 'users', transaction.userId);
+      const userSnap_notif = await getDoc(userRef_notif);
+      const userData_notif = userSnap_notif.exists() ? userSnap_notif.data() : null;
+
+      if (userData_notif?.notificationSettings?.confirmations !== false) {
+        await addDoc(collection(db, 'notifications'), {
+          userId: transaction.userId,
+          title,
+          message,
+          read: false,
+          timestamp: serverTimestamp()
+        });
+      }
 
       await logEvent(user?.uid || null, 'معاملة', `تم رفض ${transaction.type === 'deposit' ? 'إيداع' : 'سحب'} مبلغ ${transaction.amount}$ للمستخدم ${transaction.userId}`);
 
       // إرسال بريد إلكتروني (EmailJS)
-      const userRef = doc(db, 'users', transaction.userId);
-      const userSnap = await getDoc(userRef);
-      if (userSnap.exists() && import.meta.env.VITE_EMAILJS_SERVICE_ID) {
-        const userData = userSnap.data();
+      const userRef_email = doc(db, 'users', transaction.userId);
+      const userSnap_email = await getDoc(userRef_email);
+      if (userSnap_email.exists() && import.meta.env.VITE_EMAILJS_SERVICE_ID) {
+        const userData_email = userSnap_email.data();
         emailjs.send(
           import.meta.env.VITE_EMAILJS_SERVICE_ID,
           import.meta.env.VITE_EMAILJS_TEMPLATE_ID,
           {
-            to_name: userData.displayName || 'مستثمرنا العزيز',
-            to_email: userData.email,
+            to_name: userData_email.displayName || 'مستثمرنا العزيز',
+            to_email: userData_email.email,
             subject: title,
             message: message,
           },
@@ -891,6 +1012,47 @@ export default function App() {
       await setDoc(doc(db, 'notifications', notifId), { read: true }, { merge: true });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, `notifications/${notifId}`);
+    }
+  };
+
+  const handleUpdateNotificationSettings = async (settings: any) => {
+    if (!user) return;
+    try {
+      await updateDoc(doc(db, 'users', user.uid), { notificationSettings: settings });
+      setStatus({ type: 'success', message: 'تم تحديث إعدادات التنبيهات بنجاح' });
+    } catch (error) {
+      console.error('Error updating notification settings:', error);
+      setStatus({ type: 'error', message: 'فشل تحديث الإعدادات' });
+    }
+  };
+
+  const handleSendGlobalNotification = async (title: string, message: string, type: string) => {
+    if (!isAdmin) return;
+    try {
+      const usersSnap = await getDocs(collection(db, 'users'));
+      const batch = writeBatch(db);
+      let count = 0;
+      usersSnap.forEach((userDoc) => {
+        const userData = userDoc.data();
+        // Check if user has enabled this type of notification
+        if (userData.notificationSettings?.[type] !== false) {
+          const notifRef = doc(collection(db, 'notifications'));
+          batch.set(notifRef, {
+            userId: userDoc.id,
+            title,
+            message,
+            type,
+            read: false,
+            timestamp: serverTimestamp()
+          });
+          count++;
+        }
+      });
+      await batch.commit();
+      setStatus({ type: 'success', message: `تم إرسال التنبيه لـ ${count} مستخدم بنجاح` });
+    } catch (error) {
+      console.error('Error sending global notification:', error);
+      setStatus({ type: 'error', message: 'فشل إرسال التنبيه الجماعي' });
     }
   };
 
@@ -1000,6 +1162,33 @@ export default function App() {
       minInvestment: 100
     }
   ];
+
+  const DAILY_TASKS_LIST = [
+    { id: 'check_market', title: 'تحليل السوق اليومي', description: 'قم بمراجعة تقرير أداء السوق لليوم.', icon: ChartIcon },
+    { id: 'share_referral', title: 'مشاركة رابط الدعوة', description: 'شارك رابطك مع صديق واحد على الأقل.', icon: Share2 },
+    { id: 'check_news', title: 'قراءة الأخبار العاجلة', description: 'اطلع على آخر أخبار الاستثمار في التطبيق.', icon: FileText },
+  ];
+
+  const handleCompleteTask = async (taskId: string) => {
+    if (!user || !userData) return;
+    const today = new Date().toISOString().split('T')[0];
+    const currentTasks = userData.dailyTasks || { completed: [], lastDate: '' };
+    
+    if (currentTasks.lastDate !== today) {
+      currentTasks.completed = [];
+      currentTasks.lastDate = today;
+    }
+
+    if (!currentTasks.completed.includes(taskId)) {
+      currentTasks.completed.push(taskId);
+      try {
+        await updateDoc(doc(db, 'users', user.uid), { dailyTasks: currentTasks });
+        setStatus({ type: 'success', message: 'تم إكمال المهمة بنجاح!' });
+      } catch (error) {
+        console.error('Error completing task:', error);
+      }
+    }
+  };
 
   if (loading) {
     return (
@@ -1214,6 +1403,48 @@ export default function App() {
                 </span>
               </div>
             </div>
+
+            {/* المهام اليومية */}
+            {userData && (
+              <div className="bg-white dark:bg-gray-800 p-5 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 space-y-4">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-blue-900 dark:text-white flex items-center gap-2">
+                    <CheckCircle2 className="w-5 h-5 text-blue-600" />
+                    المهام اليومية
+                  </h3>
+                  <span className="text-[10px] bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 px-2 py-1 rounded-full font-bold">
+                    {userData.dailyTasks?.lastDate === new Date().toISOString().split('T')[0] ? userData.dailyTasks.completed.length : 0} / {DAILY_TASKS_LIST.length}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-500 dark:text-gray-400">أكمل جميع المهام اليومية لتتمكن من سحب أرباحك إلى المحفظة.</p>
+                
+                <div className="space-y-3">
+                  {DAILY_TASKS_LIST.map((task) => {
+                    const isCompleted = userData.dailyTasks?.lastDate === new Date().toISOString().split('T')[0] && userData.dailyTasks.completed.includes(task.id);
+                    return (
+                      <div key={task.id} className={`flex items-center justify-between p-3 rounded-xl border transition-all ${isCompleted ? 'bg-green-50 dark:bg-green-900/10 border-green-100 dark:border-green-900/30' : 'bg-gray-50 dark:bg-gray-700/30 border-gray-100 dark:border-gray-700'}`}>
+                        <div className="flex items-center gap-3">
+                          <div className={`p-2 rounded-lg ${isCompleted ? 'bg-green-100 dark:bg-green-900/30 text-green-600' : 'bg-blue-100 dark:bg-blue-900/30 text-blue-600'}`}>
+                            <task.icon className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <h4 className={`text-sm font-bold ${isCompleted ? 'text-green-900 dark:text-green-400' : 'text-gray-900 dark:text-white'}`}>{task.title}</h4>
+                            <p className="text-[10px] text-gray-500 dark:text-gray-400">{task.description}</p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => handleCompleteTask(task.id)}
+                          disabled={isCompleted}
+                          className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${isCompleted ? 'bg-green-600 text-white' : 'bg-blue-600 text-white hover:bg-blue-700 active:scale-95'}`}
+                        >
+                          {isCompleted ? 'مكتملة' : 'إكمال'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* قائمة الاستثمارات النشطة مع الأرباح */}
             <div className="space-y-3">
@@ -2098,6 +2329,48 @@ export default function App() {
                     ))}
                   </div>
                 </div>
+
+                <div className="w-full pt-6 border-t border-gray-100 dark:border-gray-700 space-y-4">
+                  <h3 className="text-sm font-bold text-blue-900 dark:text-white flex items-center gap-2">
+                    <Bell className="w-4 h-4" />
+                    إعدادات التنبيهات
+                  </h3>
+                  
+                  <div className="space-y-3">
+                    {[
+                      { id: 'confirmations', label: 'تأكيد الإيداع والسحب', icon: CheckCircle2 },
+                      { id: 'priceChanges', label: 'تغيرات أسعار الأصول', icon: TrendingUp },
+                      { id: 'dividends', label: 'توزيعات الأرباح والمكافآت', icon: Award },
+                      { id: 'marketNews', label: 'أخبار السوق العاجلة', icon: FileText },
+                    ].map((setting) => (
+                      <div key={setting.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700/50 rounded-xl border border-gray-100 dark:border-gray-600">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 bg-blue-100 dark:bg-blue-900/30 rounded-lg">
+                            <setting.icon className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                          </div>
+                          <span className="text-sm font-medium dark:text-white">{setting.label}</span>
+                        </div>
+                        <button
+                          onClick={() => {
+                            const currentSettings = userData?.notificationSettings || {
+                              confirmations: true,
+                              priceChanges: true,
+                              dividends: true,
+                              marketNews: true
+                            };
+                            handleUpdateNotificationSettings({
+                              ...currentSettings,
+                              [setting.id]: !currentSettings[setting.id]
+                            });
+                          }}
+                          className={`w-12 h-6 rounded-full transition-colors relative ${userData?.notificationSettings?.[setting.id] !== false ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}`}
+                        >
+                          <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${userData?.notificationSettings?.[setting.id] !== false ? 'right-1' : 'right-7'}`} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
               
               <div className="space-y-4">
@@ -2366,6 +2639,24 @@ export default function App() {
                   {allTransactions.filter(t => t.type === 'withdrawal' && t.status === 'approved').reduce((acc, curr) => acc + curr.amount, 0).toFixed(2)} $
                 </p>
               </div>
+              <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
+                <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 mb-1">
+                  <Award className="w-4 h-4" />
+                  <span className="text-xs">إجمالي الأرباح الموزعة</span>
+                </div>
+                <p className="text-xl font-bold text-purple-600">
+                  {allInvestments.reduce((acc, curr) => acc + calculateProfit(curr.amount, curr.timestamp, curr.sector), 0).toFixed(2)} $
+                </p>
+              </div>
+              <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700">
+                <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 mb-1">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span className="text-xs">مستخدمين موثقين</span>
+                </div>
+                <p className="text-xl font-bold text-teal-600">
+                  {allUsers.filter(u => u.kycStatus === 'verified').length}
+                </p>
+              </div>
             </div>
 
             {/* الرسوم البيانية */}
@@ -2408,6 +2699,74 @@ export default function App() {
                       <Area type="monotone" dataKey="deposits" name="الإيداعات" stroke="#16a34a" fillOpacity={1} fill="url(#colorDep)" strokeWidth={2} />
                     </AreaChart>
                   </ResponsiveContainer>
+                </div>
+              </div>
+
+              {/* إرسال تنبيهات جماعية */}
+              <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 space-y-4">
+                <h3 className="font-bold text-blue-900 dark:text-white flex items-center gap-2">
+                  <BellRing className="w-5 h-5 text-blue-600" />
+                  إرسال تنبيه جماعي للمستخدمين
+                </h3>
+                <div className="space-y-3">
+                  <input
+                    type="text"
+                    placeholder="عنوان التنبيه"
+                    value={globalNotifTitle}
+                    onChange={(e) => setGlobalNotifTitle(e.target.value)}
+                    className="w-full p-3 rounded-xl border border-gray-100 dark:border-gray-700 dark:bg-gray-900 dark:text-white text-sm"
+                  />
+                  <textarea
+                    placeholder="محتوى الرسالة"
+                    value={globalNotifMessage}
+                    onChange={(e) => setGlobalNotifMessage(e.target.value)}
+                    className="w-full p-3 rounded-xl border border-gray-100 dark:border-gray-700 dark:bg-gray-900 dark:text-white text-sm h-24"
+                  />
+                  <div className="flex gap-2">
+                    {[
+                      { id: 'marketNews', label: 'أخبار السوق', icon: FileText },
+                      { id: 'priceChanges', label: 'تغير الأسعار', icon: TrendingUp },
+                      { id: 'dividends', label: 'مكافآت', icon: Award },
+                    ].map((type) => (
+                      <button
+                        key={type.id}
+                        onClick={() => setGlobalNotifType(type.id)}
+                        className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1 ${globalNotifType === type.id ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-100 dark:bg-gray-700 text-gray-500'}`}
+                      >
+                        <type.icon className="w-3 h-3" />
+                        {type.label}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={async () => {
+                      if (!globalNotifTitle || !globalNotifMessage) {
+                        setStatus({ type: 'error', message: 'يرجى ملء جميع الحقول' });
+                        return;
+                      }
+                      await handleSendGlobalNotification(globalNotifTitle, globalNotifMessage, globalNotifType);
+                      setGlobalNotifTitle('');
+                      setGlobalNotifMessage('');
+                    }}
+                    className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 transition-all active:scale-95 flex items-center justify-center gap-2"
+                  >
+                    <Share2 className="w-5 h-5" />
+                    إرسال التنبيه الآن
+                  </button>
+                </div>
+                
+                <div className="pt-4 border-t border-gray-100 dark:border-gray-700">
+                  <button
+                    onClick={() => {
+                      setGlobalNotifTitle('تحديث أسعار السوق');
+                      setGlobalNotifMessage('لقد شهد قطاع العقارات ارتفاعاً بنسبة 2.5% اليوم. تحقق من استثماراتك الآن!');
+                      setGlobalNotifType('priceChanges');
+                    }}
+                    className="w-full bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400 py-2 rounded-lg text-xs font-bold hover:bg-yellow-100 transition-all flex items-center justify-center gap-2"
+                  >
+                    <TrendingUp className="w-4 h-4" />
+                    محاكاة تغير في الأسعار
+                  </button>
                 </div>
               </div>
             </div>
@@ -2494,10 +2853,23 @@ export default function App() {
                                 <p className="text-[10px] text-gray-400">المبلغ: {inv.amount}$</p>
                               </div>
                             </div>
-                            <div className="text-left">
-                              <p className="text-xs font-bold text-green-600">+{calculateProfit(inv.amount, inv.timestamp, inv.sector).toFixed(4)}$</p>
-                              <p className="text-[9px] text-gray-400">ربح متراكم</p>
-                            </div>
+                              <div className="text-left flex items-center gap-3">
+                                <div>
+                                  <p className="text-xs font-bold text-green-600">+{calculateProfit(inv.amount, inv.timestamp, inv.sector).toFixed(4)}$</p>
+                                  <p className="text-[9px] text-gray-400">ربح متراكم</p>
+                                </div>
+                                <button
+                                  onClick={() => {
+                                    if (window.confirm('هل أنت متأكد من إلغاء هذا الاستثمار للمستخدم؟ سيتم إرجاع المبلغ والأرباح لمحفظته.')) {
+                                      handleCancelInvestment(inv, true);
+                                    }
+                                  }}
+                                  className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+                                  title="إلغاء الاستثمار"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
                           </div>
                         ))
                       )}
@@ -2896,12 +3268,21 @@ export default function App() {
                     className={`p-4 rounded-xl border transition-all cursor-pointer ${n.read ? 'bg-gray-50 dark:bg-gray-900/50 border-gray-100 dark:border-gray-700 opacity-60' : 'bg-blue-50 dark:bg-blue-900/20 border-blue-100 dark:border-blue-900/30 shadow-sm'}`}
                   >
                     <div className="flex justify-between items-start mb-1">
-                      <h4 className={`font-bold text-sm ${n.read ? 'text-gray-600 dark:text-gray-400' : 'text-blue-900 dark:text-blue-400'}`}>{n.title}</h4>
+                      <div className="flex items-center gap-2">
+                        <div className={`p-1 rounded-md ${n.read ? 'bg-gray-200 dark:bg-gray-700' : 'bg-blue-200 dark:bg-blue-800'}`}>
+                          {n.type === 'confirmations' ? <CheckCircle2 className="w-3 h-3 text-blue-600" /> :
+                           n.type === 'priceChanges' ? <TrendingUp className="w-3 h-3 text-blue-600" /> :
+                           n.type === 'dividends' ? <Award className="w-3 h-3 text-blue-600" /> :
+                           n.type === 'marketNews' ? <FileText className="w-3 h-3 text-blue-600" /> :
+                           <Bell className="w-3 h-3 text-blue-600" />}
+                        </div>
+                        <h4 className={`font-bold text-sm ${n.read ? 'text-gray-600 dark:text-gray-400' : 'text-blue-900 dark:text-blue-400'}`}>{n.title}</h4>
+                      </div>
                       <span className="text-[8px] text-gray-400">
                         {n.timestamp?.toDate ? new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' }).format(n.timestamp.toDate()) : '...'}
                       </span>
                     </div>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">{n.message}</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed pr-7">{n.message}</p>
                   </div>
                 ))
               )}
